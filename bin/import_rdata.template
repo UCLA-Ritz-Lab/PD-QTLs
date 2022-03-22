@@ -1,0 +1,4 @@
+load('ROBJECT.RData')
+write.table(ROBJECT,file='tmp_NOTRANSPOSE.csv',quote=F,sep=',',col.names=F,row.names=T)
+write.table(t(ROBJECT),file='tmp_WITHTRANSPOSE.csv',quote=F,sep=',',col.names=F,row.names=T)
+
