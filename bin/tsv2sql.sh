@@ -17,11 +17,9 @@ echo Importing into table $tablename
 
 string='databases';
 
-#echo "create table ${tablename}(seq int auto_increment,${unique_col} varchar(50), csv_string text, primary key(seq),unique key index_${unique_col}(${unique_col}));"
 sql_pd_qtl << END
 drop table if exists ${tablename};
-#create table ${tablename}(seq int auto_increment,subject_id varchar(50), csv_string text, primary key(seq));
-create table ${tablename}(seq int auto_increment,${unique_col} varchar(50), csv_string mediumtext, primary key(seq),unique key index_${unique_col}(${unique_col}));
+create table ${tablename}(seq int auto_increment,${unique_col} varchar(50), betas_string mediumtext, primary key(seq),unique key index_${unique_col}(${unique_col}));
 load data infile "${PWD}/${tsv_filename}" into table ${tablename} fields terminated by '\t'(${unique_col},csv_string);
 END
 #echo Converting ${robject}

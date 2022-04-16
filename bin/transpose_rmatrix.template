@@ -1,0 +1,2 @@
+dat<-read.table(file='INFILE',sep='DELIMITER',header=T)
+write.table(t(dat),file='OUTFILE',quote=F,sep='\t',row.names=T,col.names=F)

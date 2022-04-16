@@ -29,7 +29,7 @@ Under <repo_root>/rawdata/Methylation, run the Python script
 
 which will provide arguments to selecting the necessary columns from a field terminated text file (in this case the Illumina annotation file) into a format that is friendly for MySQL import (e.g. Null fields will be printed as \N). In this case you can run:
 
-  ../../bin/clip.py , '*' < HumanMethylation450_15017482_v.1.2.csv > illumina_annotation_import.csv
+  ../../bin/clip.py ',' IlmnID,CHR,MAPINFO < HumanMethylation450_15017482_v.1.2.csv > illumina_annotation_import.csv
 
 which would save the new file as illumina_annotation_import.csv in the current folder.
 
@@ -39,16 +39,201 @@ There is a convenience Python script that generates a SQL import script, which i
 
 to display help on arguments.  In our case we can run:
 
- ../../bin/make_create_table.py illumina_annotation ',' < illumina_annotation_import.csv  > ../../bin/create_illumnina_annotation.sql
+ ../../bin/make_create_table.py illumina_annotation ',' < illumina_annotation_import.csv  > ../../bin/create_illumina_annotation.sql
 
 which will save a SQL script in the bin folder. Open this script with vi to edit the file accordingly :
 
- vi ../../bin/create_illumnina_annotation.sql 
+ vi ../../bin/create_illumina_annotation.sql 
 
-Certain things to edit: Columns such as numerics can be converted from text for float for example.  Also, make sure the load data infile statement points to the illumina_annotation_import.csv file. We can create indices too. Make sure CHR is changed to chrom, and its datatype is varchar(10).  MAPINFO should be a an int type.  The string ", unique key index_map(chrom,MAPINFO)" should be added right after the string "primary key ( IlmnID ),".  Now run the script as:
+Certain things to edit: Columns such as numerics can be converted from text for float for example.  Also, make sure the load data infile statement points to the illumina_annotation_import.csv file. We can create indices too. Make sure CHR is changed to chrom, and its datatype is varchar(10).  MAPINFO should be a an int type.  The string ", unique key index_map(chrom,MAPINFO)" should be added right after the string "primary key ( IlmnID ),".  
 
- sql_pd_qtl < ../../bin/create_illumnina_annotation.sql
+My version looks like:
+
+ use pd_qtl;
+ drop table if exists  illumina_annotation ;
+ create table  illumina_annotation  (IlmnID  varchar(255), chrom varchar(25), mapinfo int unsigned,  primary key ( IlmnID ), unique key index_position(chrom,mapinfo));
+ load data infile '/home/garyc/analysis/PD-QTLs/rawdata/Methylation/illumina_annotation_import.csv' into table  illumina_annotation  fields terminated by ',' ignore 1 lines;
+
+Now run the script as:
+
+ sql_pd_qtl < ../../bin/create_illumina_annotation.sql
+
+### STEP 3: Loading PEG1 covariates that include blood cell count variables
+
+Generate a SQL import friendly file from the PEG1 CSV file by running. Clip only relevant variables with command:
+
+ ../../bin/clip.py ',' ExternalDNACode,SampleID,Ethnicity,Female,Age,RFvoteHispanic,PDstudyParkinsonsDisease,Mono,Gran,CD4T,NK,CD8.naive,CD8pCD28nCD45RAn,PlasmaBlast < PEG1_cov.csv > peg1_import.csv
+
+Generate a draft SQL import script by running:
+
+
+ ../../bin/make_create_table.py peg1_covariates ',' < peg1_import.csv  > ../../bin/create_peg1_covariates.sql
+
+Edit the draft SQL script with vi:
+
+ vi ../../bin/create_peg1_covariates.sql
+
+Edit accordingly, changing SampleID (the sample ID on the microarray) to varchar(255) and adding a key for this so that we can resolve SampleIDs to PEG IDs (ExternalDNACode). Some fields should be changed to float, and PDstudyParkinsonsDisease can be a tinyint.  My version looks like:
+
+ use pd_qtl;
+ drop table if exists  peg1_covariates ;
+ create table  peg1_covariates  (peg_id  varchar(25), sample_id  varchar(25), Age  float, Ethnicity  text, PlasmaBlast  float, CD8pCD28nCD45RAn  float, CD8_naive  float, CD4T  float, NK  float, Mono  float, Gran  float, PDstudyParkinsonsDisease  tinyint, RFvoteHispanic  float,  primary key (peg_id), unique key index_sample_id(sample_id));
+ load data infile '/home/garyc/analysis/PD-QTLs/rawdata/Methylation/peg1_import.csv' into table  peg1_covariates  fields terminated by ',' ignore 1 lines;
+
+### Generate genotypes import file for MySQL
+
+Before we do that let's generate the import file for the PEGID to GWASID mapping:
+
+ ../../bin/clip.py ',' 'Pegid,GWAS_ID,DUP' < Lill\ CRG\ GWAS\ link.csv > peg_id_gwas_id_mapping_import.csv
+
+ ../../bin/make_create_table.py peg_id_gwas_id_mapping ',' < peg_id_gwas_id_mapping_import.csv > ../../bin/create_peg_id_gwas_id_mapping.sql
+
+Edit the SQL script. My version reads:
+
+use pd_qtl;
+drop table if exists  peg_id_gwas_id_mapping ;
+create table  peg_id_gwas_id_mapping  (peg_id varchar(25), gwas_id varchar(25), dup tinyint,  key index_peg_id(peg_id), key index_gwas_id(gwas_id));
+load data infile '/home/garyc/analysis/PD-QTLs/rawdata/Genetics/peg_id_gwas_id_mapping_import.csv' into table peg_id_gwas_id_mapping  fields terminated by ',' ignore 1 lines;
+
+Import the file:
+
+ sql_pd_qtl < ../../bin/create_peg_id_gwas_id_mapping.sql
+
+In the directory <repo_root>/rawdata/Genetics, run:
+
+ zcat PEG_PD.phased.vcf.gz |../../bin/parse_vcf.py 
+
+This will create three files: snpinfo.txt, subjects.txt and genotypes.txt.  To import these three files into the DB proceed with the following three steps:
+
+Generate SQL scripts for snpinfo.txt:
+
+ ../../bin/make_create_table.py snpinfo '\t' < snpinfo.txt  > ../../bin/create_snpinfo.sql
+
+Edit to:
+
+ use pd_qtl;
+ drop table if exists  snpinfo ;
+ create table  snpinfo  (snpid varchar(255),chrom varchar(10),pos int unsigned, ref_allele varchar(10),alt_allele varchar(10),primary key(snpid),unique key index_position(chrom,pos));
+ load data infile '/home/garyc/analysis/PD-QTLs/rawdata/Genetics/snpinfo.txt' into table  snpinfo  fields terminated by '\t' ignore 0 lines;
+
+ Import:
+
+ sql_pd_qtl < ../../bin/create_snpinfo.sql
+
+Generate SQL scripts for subjects.txt:
+
+ ../../bin/make_create_table.py gwas_subjects '\t' < subjects.txt > ../../bin/make_gwas_subjects.sql
+
+Edit make_gwas_subjects.sql to:
+
+ use pd_qtl;
+ drop table if exists  gwas_subjects ;
+ create table  gwas_subjects  (seq int auto_increment, gwas_id  varchar(255),  primary key ( seq ),unique key index_gwas_id(gwas_id));
+ load data infile '/home/garyc/analysis/PD-QTLs/rawdata/Genetics/subjects.txt' into table  gwas_subjects  fields terminated by '\t' ignore 0 lines(gwas_id);
+ 
+Import:
+
+ sql_pd_qtl < ../../bin/make_gwas_subjects.sql
+
+Generate SQL scripts for genotypes.txt:
+
+ ../../bin/make_create_table.py genotypes '\t' < genotypes.txt  > ../../bin/make_genotypes.sql
+
+Edit make_genotypes.sql to:
+
+ use pd_qtl;
+ drop table if exists  genotypes ;
+ create table  genotypes  (snpid varchar(255), genotype_string mediumtext, primary key(snpid));
+ load data infile '/home/garyc/analysis/PD-QTLs/rawdata/Genetics/genotypes.txt' into table  genotypes  fields terminated by '\t' ignore 0 lines;
+
+Import:
+
+ sql_pd_qtl < ../../bin/make_genotypes.sql
+
+
+# STEP 4
+
+Run scripts to filter out probes near SNPs from <repo_root>/rawdata/Methylation:
+
+R --no-save < ../../bin/filter_snp_probes.r
+
+sql_pd_qtl < ../../bin/fetch_meth_exclusion_windows.sql |sed '1d' > METH_exclude_sql.txt
+
+# STEP 5
+
+Generate a set of PLINK files based on filtering criteria:
+
+ plink2 --vcf PEG_PD.phased.vcf.gz --double-id --vcf-require-gt --geno 0.05  --maf 0.05 -hwe 0.0000001 --keep GWAS.EWAS_580_link_sort.txt --indiv-sort file GWAS.EWAS_580_link_sort.txt --make-bed --out PEG.phased.580
+
+Generate a new set of PLINK files based on CpG range exclusion for SNPs
+
+ plink2 --bfile PEG.phased.580 --exclude 'range' METH_exclude_sql.txt --make-bed --out PEG.phased.580.methex
+
+Recode to additive dosage:
+
+ plink2 --bfile PEG.phased.580.methex --recode A --out PEG.phased.580.methex.AD
+
+Make a genotype string:
+
+cut -f1-6 --complement PEG.phased.580.methex.AD.raw |sed 's/\t/,/g' > b
+
+Combine:
+
+cut -f2  PEG.phased.580.methex.AD.raw |paste - b > gwas_additive_genotypes.txt
+
+Create a SQL create table and import script in <repo_root>/bin:
+
+  ./make_create_table.py gwas_subject_genotypes '\t' < ../rawdata/Genetics/gwas_additive_genotypes.txt > create_gwas_subject_genotypes.sql
+
+Edit the SQL script. My version is:
+
+ use pd_qtl;
+ drop table if exists  gwas_subject_genotypes ;
+ create table  gwas_subject_genotypes  (gwas_id varchar(25), genotype_string mediumtext, primary key(gwas_id));
+ load data infile '/home/garyc/analysis/PD-QTLs/rawdata/Genetics/gwas_additive_genotypes.txt' into table  gwas_subject_genotypes  fields terminated by '\t' ignore 1 lines;
 
 
 
+
+Make SNP map file
+
+ plink2 --bfile PEG.phased.580.methex --recode bimbam --out PEG.phased.580.methex.bimbam
+
+
+Dump a merge of PEG1 Methylation data with GWAS ID in <repo_root>/rawdata/merge:
+
+sql_pd_qtl < ../../bin/fetch_raw_matrices.sql | gzip -c - > raw_merge.txt.gz
+
+Get a list of the SNPs
+
+in <repo_root>/rawdata/Genetics:
+
+head -n1 PEG.phased.580.methex.AD.raw |cut -f1-6 --complement > ../merge/snplist.txt
+
+
+Get a list of the subjects
+
+in <repo_root>/rawdata/merge:
+
+gunzip -c raw_merge.txt.gz |cut -f1|sed '1d' > subjectlist.txt
+
+Get a list of the probes
+
+in <repo_root>/rawdata/Methylation:
+
+cut -f1 datMethPEG1t_probe.tsv  > ../merge/probelist.txt
+
+Run the script to process the merge:
+
+in <repo_root>/rawdata/merge:
+
+gunzip -c raw_merge.txt.gz  | ../../bin/process_merge.py snplist.txt cols subjectlist.txt rows probelist.txt rows
+
+Transpose the three matrices:
+
+in <repo_root>/rawdata/merge:
+
+cat covariates.tsv |../../bin/transpose_float 551 11 > covariates_t.tsv
+cat genotypes.csv |sed 's/\,/\t/g' | ../../bin/transpose_float 551 64326 > genotypes_t.tsv 
+cat methylation.csv |sed 's/\,/\t/g' | ../../bin/transpose_float 551 485512 > methylation_t.tsv 
 

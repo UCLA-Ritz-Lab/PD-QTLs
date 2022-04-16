@@ -1,0 +1,1 @@
+select a.peg_id,a.sample_id,Female,Age,RFvoteHispanic,PDstudyParkinsonsDisease,Mono,Gran,CD4T,NK,CD8_naive,CD8pCD28nCD45RAn,PlasmaBlast,b.gwas_id,c.genotype_string,d.betas_string from peg1_covariates as a,peg_id_gwas_id_mapping as b,gwas_subject_genotypes as c,datMethPEG1t_sample as d where b.peg_id=a.peg_id and b.dup=0 and c.gwas_id=b.gwas_id and d.sample_id=a.sample_id;
