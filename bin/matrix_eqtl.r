@@ -1,3 +1,8 @@
+library(MatrixEQTL)
+
+#analysis_mode='ewas'
+#analysis_mode='kp'
+analysis_mode='cis_trans'
 
 # from https://slowkow.com/notes/ggplot2-qqplot/
 #
@@ -44,7 +49,6 @@ gg_qqplot <- function(ps, ci = 0.95) {
 
 # begin analysis here
 
-library(MatrixEQTL)
 
 ## Settings
 
@@ -55,9 +59,20 @@ useModel = modelLINEAR; # modelANOVA, modelLINEAR, or modelLINEAR_CROSS
 SNP_file_name = paste("genotypes_t.tsv", sep="");
 SNP_file_name
 
+
 # Gene expression (methylation) file name
-expression_file_name = paste("methylation_t.tsv", sep="");
-expression_file_name
+if(analysis_mode=='ewas'){
+  expression_file_name = paste("methylation_t.tsv", sep="");
+}else if(analysis_mode=='kp'){
+  expression_file_name = paste("methylation_nosnp_probes_t.tsv", sep="");
+}else if(analysis_mode=='cis_trans'){
+  snps_location_file_name = paste("snp_map.txt", sep="");
+  gene_location_file_name = paste("gene_map.txt", sep="")
+  ## Run the analysis
+  snpspos = read.table(snps_location_file_name, header = TRUE, stringsAsFactors = FALSE);
+  genepos = read.table(gene_location_file_name, header = TRUE, stringsAsFactors = FALSE);
+  expression_file_name = paste("methylation_nosnp_probes_t.tsv", sep="");
+}
 
 
 # Covariates file name
@@ -66,10 +81,23 @@ covariates_file_name = paste("covariates_t.tsv", sep="");
 covariates_file_name
 
 # Output file name
-output_file_name = tempfile();
+if(analysis_mode=='cis_trans'){
+  output_file_name_cis = tempfile();
+  output_file_name_tra = tempfile();
+}else{
+  output_file_name = tempfile();
+}
 
 # Only associations significant at this level will be saved
-pvOutputThreshold = 1e-8;
+if(analysis_mode=='ewas'){
+  pvOutputThreshold = 1e-8;
+}else if(analysis_mode=='kp'){
+  pvOutputThreshold = 1e-6;
+}else if(analysis_mode=='cis_trans'){
+  pvOutputThreshold_cis = 2e-6;
+  pvOutputThreshold_tra = 1e-6;
+  cisDist = 1e6
+}
 
 # Error covariance matrix
 # Set to numeric() for identity.
@@ -113,7 +141,26 @@ gene
 
 ## Run the analysis
 
-me = Matrix_eQTL_engine(
+if(analysis_mode=='cis_trans'){
+  me = Matrix_eQTL_main(
+  snps = snps,
+  gene = gene,
+  cvrt = cvrt,
+  output_file_name = output_file_name_tra,
+  pvOutputThreshold = pvOutputThreshold_tra,
+  useModel = useModel,
+  errorCovariance = errorCovariance,
+  verbose = TRUE,
+  output_file_name.cis = output_file_name_cis,
+  pvOutputThreshold.cis = pvOutputThreshold_cis,
+  snpspos = snpspos,
+  genepos = genepos,
+  cisDist = cisDist,
+  pvalue.hist = "qqplot",
+  min.pv.by.genesnp = FALSE,
+  noFDRsaveMemory = FALSE);
+}else{
+  me = Matrix_eQTL_engine(
   snps = snps,
   gene = gene,
   cvrt = cvrt,
@@ -125,8 +172,15 @@ me = Matrix_eQTL_engine(
   pvalue.hist = "qqplot",
   min.pv.by.genesnp = FALSE,
   noFDRsaveMemory = FALSE);
+}
 
-unlink(output_file_name);
+
+if(analysis_mode=='cis_trans'){
+  unlink(output_file_name_cis);
+  unlink(output_file_name_tra);
+}else{
+  unlink(output_file_name);
+}
 
 ## Results:
 
@@ -143,13 +197,16 @@ names(me)
 ## Plot the histogram of all p-values
 plot(me)
 
-save(me, file="me.551.qq.RData")
+save(me, file=paste("me","551",analysis_mode,"RData",sep="."))
+if(analysis_mode=='cis_trans'){
+  write.table(me$cis$eqtls,file='cis_eqtls.raw',quote=F,row.names=F)
+}
 
-ps<-me$all$eqtls$pvalue
+#ps<-me$all$eqtls$pvalue
 
-library(ggplot2)
+#library(ggplot2)
 
-gg_qqplot(ps) + theme_bw(base_size = 8) + theme( axis.ticks = element_line(size = 0.5), panel.grid = element_blank() 
+#gg_qqplot(ps) + theme_bw(base_size = 8) + theme( axis.ticks = element_line(size = 0.5), panel.grid = element_blank() 
 # panel.grid = element_line(size = 0.5, color = "grey80")
-) 
-ggsave(filename='qqplot_all_pvalues.png',plot=last_plot(),device='png',path = NULL, scale = 1, width = 1000, height = 1000, units = "px", dpi = 300, limitsize = TRUE, bg = NULL)
+#) 
+#ggsave(filename='qqplot_all_pvalues.png',plot=last_plot(),device='png',path = NULL, scale = 1, width = 1000, height = 1000, units = "px", dpi = 300, limitsize = TRUE, bg = NULL)
