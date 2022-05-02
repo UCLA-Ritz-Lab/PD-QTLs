@@ -281,3 +281,8 @@ Load the results and get the BED file:
 
 	sql_pd_qtl < ../../bin/get_cis_eqtls.sql |sed '1d' |sed 's/^/chr/' > cis_eqtls.bed
 
+[GO term enrichments](http://www.caseyandgary.com:8099/~garyc/pd_qtl/go_enrichment.html)
+
+[Full results from GREAT enrichment for cis-trans](http://www.caseyandgary.com:8099/~garyc/pd_qtl/cis_eqtls.bed)
+
+
