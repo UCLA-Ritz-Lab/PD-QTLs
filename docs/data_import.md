@@ -155,22 +155,6 @@ Import:
 
 	sql_pd_qtl < ../../bin/make_gwas_subjects.sql
 
-Generate SQL scripts for genotypes.txt:
-
-	../../bin/make_create_table.py genotypes '\t' < genotypes.txt  > ../../bin/make_genotypes.sql
-
-Edit make_genotypes.sql to:
-
-```
-use pd_qtl;
-drop table if exists  genotypes ;
-create table  genotypes  (snpid varchar(255), genotype_string mediumtext, primary key(snpid));
-load data infile '/home/garyc/analysis/PD-QTLs/rawdata/Genetics/genotypes.txt' into table  genotypes  fields terminated by '\t' ignore 0 lines;
-```
-
-Import:
-
-	sql_pd_qtl < ../../bin/make_genotypes.sql
 
 
 # Use PLINK2 to filter GWAS dataset to keep SNPs that are 1) not in methylation probes, 2) >=5% genotyped 3) >=5% MAF 4) HWE p>=1e-7
@@ -284,5 +268,40 @@ Load the results and get the BED file:
 [GO term enrichments](http://www.caseyandgary.com:8099/~garyc/pd_qtl/go_enrichment.html)
 
 [Full results from GREAT enrichment for cis-trans](http://www.caseyandgary.com:8099/~garyc/pd_qtl/cis_eqtls.bed)
+
+## PD disease SNPs for enrichment analysis
+
+Load in the SNPs in [repo_root]/rawdata/Genetics:
+
+	sql_pd_qtl < ../bin/fetch_hypergeometric_param.sql
+
+Output should look like:
+
+```
+ALL SNPS
+ALL SNPS
+count(snpid)
+64326
+ALL MEQTLS
+ALL MEQTLS
+count(distinct b.snpid)
+2216
+ALL PD SNPS
+ALL PD SNPS
+count(a.snpid)
+2602
+ALL PD SNPS that are MEQTLS
+ALL PD SNPS that are MEQTLS
+count(distinct b.snpid)
+120
+```
+
+So among 64,326 QC passed SNPs tested for association on PEG, 2,216 of these were deemed as significant meQTLs.  Computing a p-value for the hypergeometic test where alternative hypothesis is observing 120 or more meQTLs among the 2602 PD SNPs.
+
+```
+> phyper(120-1, 2216, 64326-2216, 2602,lower.tail=F)
+[1] 0.000834084
+```
+> 
 
 
