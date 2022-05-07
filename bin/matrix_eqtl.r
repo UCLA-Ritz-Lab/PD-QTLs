@@ -199,7 +199,8 @@ plot(me)
 
 save(me, file=paste("me","551",analysis_mode,"RData",sep="."))
 if(analysis_mode=='cis_trans'){
-  write.table(me$cis$eqtls,file='cis_eqtls.raw',quote=F,row.names=F)
+  write.table(me$cis$eqtls,file='cis_eqtls.raw',quote=F,row.names=F,sep='\t')
+  write.table(me$trans$eqtls,file='trans_eqtls.raw',quote=F,row.names=F,sep='\t')
 }
 
 #ps<-me$all$eqtls$pvalue

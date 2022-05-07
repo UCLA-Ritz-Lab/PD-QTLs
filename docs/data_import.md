@@ -258,7 +258,9 @@ in [repo_root]/rawdata/merge:
 
 ```
 R --no-save < ../../bin/matrix_eqtls.r
-sed 's/_/\t/' cis_eqtls.raw | sed '1d' > cis_eqtls.txt
+sed 's/_/\t/' cis_eqtls.raw | sed '1d' | sed 's/^/cis\t/' > cis_eqtls.txt
+sed 's/_/\t/' trans_eqtls.raw | sed '1d' | sed 's/^/trans\t/' > trans_eqtls.txt
+sed 's/_/\t/' all_eqtls.raw | sed '1d' | sed 's/^/all\t/' > all_eqtls.txt
 ```
 
 Load the results and get the BED file:
@@ -278,29 +280,72 @@ Load in the SNPs in [repo_root]/rawdata/Genetics:
 Output should look like:
 
 ```
+
+garyc@lupine:~/analysis/PD-QTLs/rawdata/merge$ sql_pd_qtl  < ../../bin/fetch_hypergeometric_param.sql 
+mysql: [Warning] Using a password on the command line interface can be insecure.
 ALL SNPS
 ALL SNPS
 count(snpid)
 64326
-ALL MEQTLS
-ALL MEQTLS
+ALL cis MEQTLS
+ALL cis MEQTLS
 count(distinct b.snpid)
 2216
 ALL PD SNPS
 ALL PD SNPS
 count(a.snpid)
 2602
-ALL PD SNPS that are MEQTLS
-ALL PD SNPS that are MEQTLS
+ALL PD SNPS that are cis MEQTLS
+ALL PD SNPS that are cis MEQTLS
 count(distinct b.snpid)
 120
+ALL SNPS
+ALL SNPS
+count(snpid)
+64326
+ALL trans MEQTLS
+ALL trans MEQTLS
+count(distinct b.snpid)
+6605
+ALL PD SNPS
+ALL PD SNPS
+count(a.snpid)
+2602
+ALL PD SNPS that are trans MEQTLS
+ALL PD SNPS that are trans MEQTLS
+count(distinct b.snpid)
+244
+ALL SNPS
+ALL SNPS
+count(snpid)
+64326
+ALL cistrans MEQTLS
+ALL cistrans MEQTLS
+count(distinct b.snpid)
+3681
+ALL PD SNPS
+ALL PD SNPS
+count(a.snpid)
+2602
+ALL PD SNPS that are cistrans MEQTLS
+ALL PD SNPS that are cistrans MEQTLS
+count(distinct b.snpid)
+157
+
 ```
 
 So among 64,326 QC passed SNPs tested for association on PEG, 2,216 of these were deemed as significant meQTLs.  Computing a p-value for the hypergeometic test where alternative hypothesis is observing 120 or more meQTLs among the 2602 PD SNPs.
 
 ```
+#cis
 > phyper(120-1, 2216, 64326-2216, 2602,lower.tail=F)
 [1] 0.000834084
+#trans
+> phyper(244-1,6605,64326-6605,2602,lower.tail=F)
+[1] 0.9421406
+#all
+> phyper(157-1,3681,64326-3681,2602,lower.tail=F)
+[1] 0.2540671
 ```
 > 
 
