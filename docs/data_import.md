@@ -177,14 +177,29 @@ Import:
 
 	plink2 --bfile PEG.phased.580.methex --recode A --out PEG.phased.580.methex.AD
 
+or
+
+	plink2 --bfile PEG.phased.580 --recode A --out PEG.phased.580.AD
+
+
 ##Make SNP map file
 
- plink2 --bfile PEG.phased.580.methex --recode bimbam --out PEG.phased.580.methex.bimbam
+	plink2 --bfile PEG.phased.580.methex --recode bimbam --out PEG.phased.580.methex.bimbam
+
+or
+
+	plink2 --bfile PEG.phased.580 --recode bimbam --out PEG.phased.580.bimbam
+
 
 ## Concatenate subject's genotypes into a single CSV genotype string:
 
 	cut -f1-6 --complement PEG.phased.580.methex.AD.raw |sed 's/\t/,/g' > b
-cut -f2  PEG.phased.580.methex.AD.raw |paste - b > gwas_additive_genotypes.txt
+	cut -f2  PEG.phased.580.methex.AD.raw |paste - b > gwas_methex_additive_genotypes.txt
+
+or
+
+	cut -f1-6 --complement PEG.phased.580.AD.raw |sed 's/\t/,/g' > b
+	cut -f2  PEG.phased.580.AD.raw |paste - b > gwas_additive_genotypes.txt
 
 ## Create a SQL create table and import script in [repo_root]/bin:
 
@@ -199,6 +214,11 @@ create table  gwas_subject_genotypes  (gwas_id varchar(25), genotype_string medi
 load data infile '/home/garyc/analysis/PD-QTLs/rawdata/Genetics/gwas_additive_genotypes.txt' into table  gwas_subject_genotypes  fields terminated by '\t' ignore 1 lines;
 ```
 
+run the script in [repo_root]/bin:
+
+sql_pd_qtl < create_gwas_subject_genotypes.sql
+
+
 # Dump a merge of PEG1 Methylation data
 
 To get a dataset for all subjects that have covariates, genotypes, and methylation data, we run a join on MySQL. In [repo_root]/rawdata/merge:
@@ -211,11 +231,14 @@ Get a list of the SNPs in [repo_root]/rawdata/Genetics:
 
 	head -n1 PEG.phased.580.methex.AD.raw |cut -f1-6 --complement > ../merge/snplist.txt
 
+or 
+	head -n1 PEG.phased.580.AD.raw |cut -f1-6 --complement > ../merge/snplist.txt
+
 
 Get a list of the subjects in [repo_root]/rawdata/merge:
 
 	gunzip -c raw_merge.txt.gz |cut -f1|sed '1d' > subjectlist.txt
-
+st
 Get a list of the probes in [repo_root]/rawdata/Methylation:
 
 	cut -f1 datMethPEG1t_probe.tsv  > ../merge/probelist.txt
@@ -228,7 +251,8 @@ Transpose the three matrices in [repo_root]/rawdata/merge:
 
 ```
 cat covariates.tsv |../../bin/transpose_float 551 11 > covariates_t.tsv
-cat genotypes.csv |sed 's/\,/\t/g' | ../../bin/transpose_float 551 64326 > genotypes_t.tsv 
+#cat genotypes.csv |sed 's/\,/\t/g' | ../../bin/transpose_float 551 64326 > genotypes_t.tsv 
+cat genotypes.csv |sed 's/\,/\t/g' | ../../bin/transpose_float 551 263704 > genotypes_t.tsv 
 cat methylation.csv |sed 's/\,/\t/g' | ../../bin/transpose_float 551 485512 > methylation_t.tsv 
 ```
 
@@ -257,7 +281,7 @@ sql_pd_qtl < ../../bin/fetch_gwas_map.sql|sed 's/\t/_/' >snp_map.txt
 in [repo_root]/rawdata/merge:
 
 ```
-R --no-save < ../../bin/matrix_eqtls.r
+R --no-save < ../../bin/matrix_eqtl.r
 sed 's/_/\t/' cis_eqtls.raw | sed '1d' | sed 's/^/cis\t/' > cis_eqtls.txt
 sed 's/_/\t/' trans_eqtls.raw | sed '1d' | sed 's/^/trans\t/' > trans_eqtls.txt
 sed 's/_/\t/' all_eqtls.raw | sed '1d' | sed 's/^/all\t/' > all_eqtls.txt
@@ -273,9 +297,9 @@ Load the results and get the BED file:
 
 ## PD disease SNPs for enrichment analysis
 
-Load in the SNPs in [repo_root]/rawdata/Genetics:
+Load in the SNPs in [repo_root]/rawdata/merge:
 
-	sql_pd_qtl < ../bin/fetch_hypergeometric_param.sql
+	sql_pd_qtl < ../../bin/fetch_hypergeometric_param.sql
 
 Output should look like:
 
@@ -340,12 +364,18 @@ So among 64,326 QC passed SNPs tested for association on PEG, 2,216 of these wer
 #cis
 > phyper(120-1, 2216, 64326-2216, 2602,lower.tail=F)
 [1] 0.000834084
+> phyper(353-1,4170,64326-4170,2602,lower.tail=F)
+[1] 2.172357e-40
 #trans
 > phyper(244-1,6605,64326-6605,2602,lower.tail=F)
 [1] 0.9421406
+> phyper(842-1,13596,64326-13596,2602,lower.tail=F)
+[1] 2.272072e-42
 #all
 > phyper(157-1,3681,64326-3681,2602,lower.tail=F)
 [1] 0.2540671
+> phyper(948-1,8409,64326-8409,2602,lower.tail=F)
+[1] 3.100249e-211
 ```
 > 
 
