@@ -1,8 +1,8 @@
 library(MatrixEQTL)
 
 #analysis_mode='ewas'
-#analysis_mode='kp'
-analysis_mode='cis_trans'
+analysis_mode='kp'
+#analysis_mode='cis_trans'
 
 # from https://slowkow.com/notes/ggplot2-qqplot/
 #
@@ -66,8 +66,8 @@ if(analysis_mode=='ewas'){
 }else if(analysis_mode=='kp'){
   expression_file_name = paste("methylation_nosnp_probes_t.tsv", sep="");
 }else if(analysis_mode=='cis_trans'){
-  snps_location_file_name = paste("snp_map.txt", sep="");
-  gene_location_file_name = paste("gene_map.txt", sep="")
+  snps_location_file_name = paste("../snp_map.txt", sep="");
+  gene_location_file_name = paste("../gene_map.txt", sep="")
   ## Run the analysis
   snpspos = read.table(snps_location_file_name, header = TRUE, stringsAsFactors = FALSE);
   genepos = read.table(gene_location_file_name, header = TRUE, stringsAsFactors = FALSE);
@@ -197,12 +197,13 @@ names(me)
 ## Plot the histogram of all p-values
 plot(me)
 
-save(me, file=paste("me","551",analysis_mode,"RData",sep="."))
+save(me, file=paste("me",analysis_mode,"RData",sep="."))
 if(analysis_mode=='cis_trans'){
   write.table(me$cis$eqtls,file='cis_eqtls.raw',quote=F,row.names=F,sep='\t')
   write.table(me$trans$eqtls,file='trans_eqtls.raw',quote=F,row.names=F,sep='\t')
+}else if(analysis_mode=='kp'){
+  write.table(me$all$eqtls,file='all_eqtls.raw',quote=F,row.names=F,sep='\t')
 }
-
 #ps<-me$all$eqtls$pvalue
 
 #library(ggplot2)

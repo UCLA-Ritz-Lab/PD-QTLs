@@ -67,7 +67,7 @@ def main():
 				if(col_id in user_col_indices):
 					if(printed):
 						print(delimiter,end='')
-					if(line_token == '' or line_token == 'NA'):
+					if(line_token == '' or line_token == 'NA' or line_token == '.'):
 						line_token = '\\N'
 					elif(line_token == '.'):
 						line_token = '0.0'

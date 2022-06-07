@@ -70,6 +70,7 @@ Now run the script as:
 
 	sql_pd_qtl < ../../bin/create_illumina_annotation.sql
 
+## Import PEG1 covariates into DB
 
 Loading PEG1 covariates that include blood cell count variables
 
@@ -93,6 +94,12 @@ drop table if exists  peg1_covariates ;
 create table  peg1_covariates  (peg_id  varchar(25), sample_id  varchar(25), Age  float, Ethnicity  text, PlasmaBlast  float, CD8pCD28nCD45RAn  float, CD8_naive  float, CD4T  float, NK  float, Mono  float, Gran  float, PDstudyParkinsonsDisease  tinyint, RFvoteHispanic  float,  primary key (peg_id), unique key index_sample_id(sample_id));
 load data infile '/home/garyc/analysis/PD-QTLs/rawdata/Methylation/peg1_import.csv' into table  peg1_covariates  fields terminated by ',' ignore 1 lines;
 ```
+
+## Import PEG2 covariates into DB
+
+	sql_pd_qtl < ../../bin/fetch_peg2_link_sort.sql  | sed '1d' > GWAS.EWAS_209_link_sort.txt
+
+	sql_pd_qtl < ../../bin/create_peg2_covariates.sql 
 
 ### Generate genotypes import file for MySQL
 
@@ -161,7 +168,13 @@ Import:
 
 ##Generate a set of PLINK files based on filtering criteria:
 
+### PEG1
+
 	plink2 --vcf PEG_PD.phased.vcf.gz --double-id --vcf-require-gt --geno 0.05  --maf 0.05 -hwe 0.0000001 --keep GWAS.EWAS_580_link_sort.txt --indiv-sort file GWAS.EWAS_580_link_sort.txt --make-bed --out PEG.phased.580
+
+### PEG2
+
+	plink2 --vcf PEG_PD.phased.vcf.gz --double-id --vcf-require-gt --geno 0.05  --maf 0.05 -hwe 0.0000001 --keep GWAS.EWAS_209_link_sort.txt --indiv-sort file GWAS.EWAS_209_link_sort.txt --make-bed --out PEG.phased.209
 
 ## Run shell scripts to filter out probes near SNPs. From [repo_root]/rawdata/Methylation:
 
@@ -169,7 +182,10 @@ Import:
 
 ##Generate a new set of PLINK files based on CpG range exclusion for SNPs
 
+### PEG1
 	plink2 --bfile PEG.phased.580 --exclude 'range' METH_exclude_sql.txt --make-bed --out PEG.phased.580.methex
+### PEG2
+	plink2 --bfile PEG.phased.209 --exclude 'range' METH_exclude_sql.txt --make-bed --out PEG.phased.209.methex
 
 # Generate subject major dataset with additive genotypes
 
@@ -179,7 +195,10 @@ Import:
 
 or
 
+### PEG1
 	plink2 --bfile PEG.phased.580 --recode A --out PEG.phased.580.AD
+### PEG2
+	plink2 --bfile PEG.phased.209 --recode A --out PEG.phased.209.AD
 
 
 ##Make SNP map file
@@ -188,7 +207,10 @@ or
 
 or
 
+### PEG1
 	plink2 --bfile PEG.phased.580 --recode bimbam --out PEG.phased.580.bimbam
+### PEG2
+	plink2 --bfile PEG.phased.209 --recode bimbam --out PEG.phased.209.bimbam
 
 
 ## Concatenate subject's genotypes into a single CSV genotype string:
@@ -198,90 +220,123 @@ or
 
 or
 
+### PEG1
 	cut -f1-6 --complement PEG.phased.580.AD.raw |sed 's/\t/,/g' > b
-	cut -f2  PEG.phased.580.AD.raw |paste - b > gwas_additive_genotypes.txt
-
-## Create a SQL create table and import script in [repo_root]/bin:
-
-	./make_create_table.py gwas_subject_genotypes '\t' < ../rawdata/Genetics/gwas_additive_genotypes.txt > create_gwas_subject_genotypes.sql
-
-## Edit the SQL script. My version is:
-
-```
-use pd_qtl;
-drop table if exists  gwas_subject_genotypes ;
-create table  gwas_subject_genotypes  (gwas_id varchar(25), genotype_string mediumtext, primary key(gwas_id));
-load data infile '/home/garyc/analysis/PD-QTLs/rawdata/Genetics/gwas_additive_genotypes.txt' into table  gwas_subject_genotypes  fields terminated by '\t' ignore 1 lines;
-```
+	cut -f2  PEG.phased.580.AD.raw |paste - b > gwas_additive_genotypes_580.txt
+### PEG2
+	cut -f1-6 --complement PEG.phased.209.AD.raw |sed 's/\t/,/g' > b
+	cut -f2  PEG.phased.209.AD.raw |paste - b > gwas_additive_genotypes_209.txt
 
 run the script in [repo_root]/bin:
 
-sql_pd_qtl < create_gwas_subject_genotypes.sql
+### PEG1
+	./create_gwas_subject_genotypes.sh 580
+### PEG2
+	./create_gwas_subject_genotypes.sh 209
 
 
-# Dump a merge of PEG1 Methylation data
+## Dump a merge of PEG1 Methylation data
 
-To get a dataset for all subjects that have covariates, genotypes, and methylation data, we run a join on MySQL. In [repo_root]/rawdata/merge:
+To get a dataset for all subjects that have covariates, genotypes, and methylation data, we run a join on MySQL. 
 
-	sql_pd_qtl < ../../bin/fetch_raw_matrices.sql | gzip -c - > raw_merge.txt.gz
+### PEG1
+In [repo_root]/rawdata/merge/peg1:
+	../../../bin/fetch_raw_matrices_peg.sh 1 580 | gzip -c - > raw_merge.txt.gz
+### PEG2
+In [repo_root]/rawdata/merge/peg2:
+	../../../bin/fetch_raw_matrices_peg.sh 2 209 | gzip -c - > raw_merge.txt.gz
 
 Next we must provide the raw_merge.txt.gz file with some metadata including a SNP list, subject list, and probe list.
 
 Get a list of the SNPs in [repo_root]/rawdata/Genetics:
 
-	head -n1 PEG.phased.580.methex.AD.raw |cut -f1-6 --complement > ../merge/snplist.txt
+	head -n1 PEG.phased.580.methex.AD.raw |cut -f1-6 --complement > ../merge/peg1/snplist.txt
 
 or 
-	head -n1 PEG.phased.580.AD.raw |cut -f1-6 --complement > ../merge/snplist.txt
 
 
-Get a list of the subjects in [repo_root]/rawdata/merge:
+### PEG1
+	head -n1 PEG.phased.580.AD.raw |cut -f1-6 --complement > ../merge/peg1/snplist.txt
+### PEG2
+	head -n1 PEG.phased.209.AD.raw |cut -f1-6 --complement > ../merge/peg2/snplist.txt
 
+
+Get a list of the subjects:
+
+### PEG1
+in [repo_root]/rawdata/merge/peg1:
 	gunzip -c raw_merge.txt.gz |cut -f1|sed '1d' > subjectlist.txt
+### PEG2
+in [repo_root]/rawdata/merge/peg2:
+	gunzip -c raw_merge.txt.gz |cut -f1|sed '1d' > subjectlist.txt
+
 st
 Get a list of the probes in [repo_root]/rawdata/Methylation:
 
-	cut -f1 datMethPEG1t_probe.tsv  > ../merge/probelist.txt
+### PEG1
+	cut -f1 datMethPEG1t_probe.tsv  > ../merge/peg1/probelist.txt
+### PEG2
+	cut -f1 datMethPEG2t_probe.tsv  > ../merge/peg2/probelist.txt
 
-Run the script to process the merge in [repo_root]/rawdata/merge:
+Run the script to process the merge 
 
-	gunzip -c raw_merge.txt.gz  | ../../bin/process_merge.py snplist.txt cols subjectlist.txt rows probelist.txt rows
+### PEG1
+in [repo_root]/rawdata/merge/peg1:
+	gunzip -c raw_merge.txt.gz  | ../../../bin/process_merge.py snplist.txt cols subjectlist.txt rows probelist.txt rows
+### PEG2
+in [repo_root]/rawdata/merge/peg2:
+	gunzip -c raw_merge.txt.gz  | ../../../bin/process_merge.py snplist.txt cols subjectlist.txt rows probelist.txt rows
 
-Transpose the three matrices in [repo_root]/rawdata/merge:
-
+Transpose the three matrices
+### PEG1
+in [repo_root]/rawdata/merge/peg1:
 ```
-cat covariates.tsv |../../bin/transpose_float 551 11 > covariates_t.tsv
-#cat genotypes.csv |sed 's/\,/\t/g' | ../../bin/transpose_float 551 64326 > genotypes_t.tsv 
-cat genotypes.csv |sed 's/\,/\t/g' | ../../bin/transpose_float 551 263704 > genotypes_t.tsv 
-cat methylation.csv |sed 's/\,/\t/g' | ../../bin/transpose_float 551 485512 > methylation_t.tsv 
+cat covariates.tsv |../../../bin/transpose_float 551 11 > covariates_t.tsv
+#cat genotypes.csv |sed 's/\,/\t/g' | ../../../bin/transpose_float 551 64326 > genotypes_t.tsv 
+cat genotypes.csv |sed 's/\,/\t/g' | ../../../bin/transpose_float 551 263704 > genotypes_t.tsv 
+cat methylation.csv |sed 's/\,/\t/g' | ../../../bin/transpose_float 551 485512 > methylation_t.tsv 
+```
+### PEG1
+in [repo_root]/rawdata/merge/peg2:
+```
+cat covariates.tsv |../../../bin/transpose_float 209 11 > covariates_t.tsv
+#cat genotypes.csv |sed 's/\,/\t/g' | ../../../bin/transpose_float 209 64326 > genotypes_t.tsv 
+cat genotypes.csv |sed 's/\,/\t/g' | ../../../bin/transpose_float 209 272674 > genotypes_t.tsv 
+cat methylation.csv |sed 's/\,/\t/g' | ../../../bin/transpose_float 209 485512 > methylation_t.tsv 
 ```
 
-# cis trans analysis
+## cis trans analysis
 
-## Generate a list of probes that do not contain SNPs
+### Generate a list of probes that do not contain SNPs
 
 These are eligible for eQTL analysis for cis trans. To run
 
+in [repo_root]/rawdata/Methylation:
 	sql_pd_qtl < ../../bin/fetch_nosnp_probes.sql |sed '1d' > nosnp_probes.txt
+
 To get a methylation dataset that excludes probes with SNPs in it:
 
-	../../bin/filter_probes.py whitelist ../Methylation/nosnp_probes.txt < methylation_t.tsv > methylation_nosnp_probes_t.tsv
+#### PEG1
+in [repo_root]/rawdata/merge/peg1:
+	../../../bin/filter_probes.py whitelist ../../Methylation/nosnp_probes.txt < methylation_t.tsv > methylation_nosnp_probes_t.tsv
+#### PEG2
+in [repo_root]/rawdata/merge/peg2:
+	../../../bin/filter_probes.py whitelist ../../Methylation/nosnp_probes.txt < methylation_t.tsv > methylation_nosnp_probes_t.tsv
 
-## To get a gene map and snp map file 
+### To get a gene map and snp map file 
 
 in [repo_root]/rawdata/merge:
-
 ```
 sql_pd_qtl < ../../bin/fetch_nosnp_probes_and_map.sql > gene_map.txt
 sql_pd_qtl < ../../bin/fetch_gwas_map.sql|sed 's/\t/_/' >snp_map.txt
 ```
 
-## Run the analysis 
+### Run the analysis 
 
-in [repo_root]/rawdata/merge:
+in [repo_root]/rawdata/merge/peg[1|2]:
 
 ```
-R --no-save < ../../bin/matrix_eqtl.r
+R --no-save < ../../../bin/matrix_eqtl.r
 sed 's/_/\t/' cis_eqtls.raw | sed '1d' | sed 's/^/cis\t/' > cis_eqtls.txt
 sed 's/_/\t/' trans_eqtls.raw | sed '1d' | sed 's/^/trans\t/' > trans_eqtls.txt
 sed 's/_/\t/' all_eqtls.raw | sed '1d' | sed 's/^/all\t/' > all_eqtls.txt
@@ -289,74 +344,25 @@ sed 's/_/\t/' all_eqtls.raw | sed '1d' | sed 's/^/all\t/' > all_eqtls.txt
 
 Load the results and get the BED file:
 
-	sql_pd_qtl < ../../bin/get_cis_eqtls.sql |sed '1d' |sed 's/^/chr/' > cis_eqtls.bed
+#### PEG1
+	../../../bin/get_cis_eqtls.sh 1 |sed '1d' |sed 's/^/chr/' > cis_eqtls.bed
+#### PEG2
+	../../../bin/get_cis_eqtls.sh 2 |sed '1d' |sed 's/^/chr/' > cis_eqtls.bed
 
 [GO term enrichments](http://www.caseyandgary.com:8099/~garyc/pd_qtl/go_enrichment.html)
 
 [Full results from GREAT enrichment for cis-trans](http://www.caseyandgary.com:8099/~garyc/pd_qtl/cis_eqtls.bed)
 
-## PD disease SNPs for enrichment analysis
+### PD disease SNPs for enrichment analysis
 
-Load in the SNPs in [repo_root]/rawdata/merge:
+Load in the SNPs 
 
-	sql_pd_qtl < ../../bin/fetch_hypergeometric_param.sql
-
-Output should look like:
-
-```
-
-garyc@lupine:~/analysis/PD-QTLs/rawdata/merge$ sql_pd_qtl  < ../../bin/fetch_hypergeometric_param.sql 
-mysql: [Warning] Using a password on the command line interface can be insecure.
-ALL SNPS
-ALL SNPS
-count(snpid)
-64326
-ALL cis MEQTLS
-ALL cis MEQTLS
-count(distinct b.snpid)
-2216
-ALL PD SNPS
-ALL PD SNPS
-count(a.snpid)
-2602
-ALL PD SNPS that are cis MEQTLS
-ALL PD SNPS that are cis MEQTLS
-count(distinct b.snpid)
-120
-ALL SNPS
-ALL SNPS
-count(snpid)
-64326
-ALL trans MEQTLS
-ALL trans MEQTLS
-count(distinct b.snpid)
-6605
-ALL PD SNPS
-ALL PD SNPS
-count(a.snpid)
-2602
-ALL PD SNPS that are trans MEQTLS
-ALL PD SNPS that are trans MEQTLS
-count(distinct b.snpid)
-244
-ALL SNPS
-ALL SNPS
-count(snpid)
-64326
-ALL cistrans MEQTLS
-ALL cistrans MEQTLS
-count(distinct b.snpid)
-3681
-ALL PD SNPS
-ALL PD SNPS
-count(a.snpid)
-2602
-ALL PD SNPS that are cistrans MEQTLS
-ALL PD SNPS that are cistrans MEQTLS
-count(distinct b.snpid)
-157
-
-```
+#### PEG1
+in [repo_root]/rawdata/merge/peg1:
+	../../../bin/fetch_hypergeometric_param.sh 1
+#### PEG2
+in [repo_root]/rawdata/merge/peg2:
+	../../../bin/fetch_hypergeometric_param.sh 2
 
 So among 64,326 QC passed SNPs tested for association on PEG, 2,216 of these were deemed as significant meQTLs.  Computing a p-value for the hypergeometic test where alternative hypothesis is observing 120 or more meQTLs among the 2602 PD SNPs.
 
@@ -377,6 +383,104 @@ So among 64,326 QC passed SNPs tested for association on PEG, 2,216 of these wer
 > phyper(948-1,8409,64326-8409,2602,lower.tail=F)
 [1] 3.100249e-211
 ```
-> 
+ 
 
+# PEG2 pipeline
+
+Repeat PEG1 with peg1 string replaced by peg2
+
+
+# Results
+
+## Open issue
+
+Covariates?
+
+```
+garyc@lupine:~/analysis/PD-QTLs/rawdata/merge$ head -n2 peg?/covariates.tsv
+==> peg1/covariates.tsv <==
+subject	Female	Age	RFvoteHispanic	PDstudyParkinsonsDisease	Mono	Gran	CD4T	NK	CD8_naive	CD8pCD28nCD45RAn	PlasmaBlast
+10002AP40	0	61	0.153439	1	0.0883461	0.702761	0.108779	0.0183139	105.07	14.5551	2.07082
+
+==> peg2/covariates.tsv <==
+subject	Female	Age	RFvoteHispanic	PDstudyParkinsonsDisease	Mono	Gran	CD4T	NK	CD8_naive	CD8pCD28nCD45RAn	PlasmaBlast
+80159WF40	0	71.2	NULL	1	0.048608	0.555363	0.0541631	0.146495	166.338	14.6923	1.79475
+garyc@lupine:~/analysis/PD-QTLs/rawdata/merge$ `
+```
+
+## PEG2 replication
+
+### 73026 of 109178 eQTLS from PEG1 are not replicated in PEG2
+### 0 of 35908 eQTLS from PEG2 are not replicated in PEG1
+```
+garyc@lupine:~/analysis/PD-QTLs/results/eqtls$ grep -c NULL *txt
+distinct_meqtls_peg1.txt:73026
+distinct_meqtls_peg2.txt:0
+overlap_meqtls_peg1.txt:0
+overlap_meqtls_peg2.txt:0
+garyc@lupine:~/analysis/PD-QTLs/results/eqtls$ wc -l distinct_meqtls_peg1.txt 
+109178 distinct_meqtls_peg1.txt
+garyc@lupine:~/analysis/PD-QTLs/results/eqtls$ wc -l distinct_meqtls_peg2.txt 
+35908 distinct_meqtls_peg2.txt
+garyc@lupine:~/analysis/PD-QTLs/results/eqtls$ 
+```
+
+## Top results from PEG1 or PEG2
+
+```
+garyc@lupine:~/analysis/PD-QTLs/results/eqtls$ head distinct_meqtls_peg*
+==> distinct_meqtls_peg1.txt <==
+me_qtl_type	snp_id	allele	gene	peg	pvalue	FDR	beta	peg	pvalue	FDR	beta
+cis	GSA-rs1040961	G	cg17707870	peg1	3.19657356478992e-240	3.02266263743662e-232	0.463461	peg2	1.75221926908519e-73	9.04349479281351e-67	0.476207
+cis	rs10010994	C	cg17858192	peg1	1.07333906461107e-224	5.07471800999251e-217	0.38231	peg2	2.87543180201319e-69	8.83254921602953e-63	0.380936
+cis	rs10184015	A	cg02502145	peg1	2.35478400502351e-214	7.42223664073641e-207	0.458667	peg2	3.27733181336013e-71	1.46082830374007e-64	0.477257
+cis	rs2532925	G	cg04145681	peg1	9.42822327913758e-211	2.22881920794558e-203	0.471904	peg2	2.27317819557558e-74	1.31125151237358e-67	0.458799
+cis	exm2267473	G	cg09084244	peg1	2.65120419044779e-207	5.01392862592143e-200	0.422279	peg2	2.66697691072591e-68	5.23059017069958e-62	0.407247
+cis	GSA-rs1035142	T	cg07227024	peg1	3.20562587043044e-203	5.05203741431135e-196	0.428486	peg2	5.38180254456733e-71	2.1989631919515e-64	0.434122
+cis	GSA-rs10750097	G	cg12556569	peg1	1.21710492165548e-201	1.64412545315535e-194	0.385482	peg2	2.47609121473652e-70	9.33887867099282e-64	0.394837
+cis	rs1043793	A	cg02502145	peg1	2.89813128784325e-199	3.42557154739125e-192	0.452316	peg2	7.18611377732221e-44	1.61625187488907e-38	0.429988
+cis	rs8106375	G	cg22996768	peg1	7.34618381232944e-199	7.7183462184694e-192	0.472055	peg2	1.70179415323157e-55	9.11921341179653e-50	0.466453
+
+==> distinct_meqtls_peg2.txt <==
+me_qtl_type	snp_id	allele	gene	peg	pvalue	FDR	beta	peg	pvalue	FDR	beta
+cis	GSA-rs4796640	G	cg25929399	peg1	7.80749012719841e-181	3.35578197621924e-174	0.438301	peg2	1.90294376752955e-111	1.86606770493654e-103	0.499874
+cis	GSA-rs2294942	G	cg05704942	peg1	1.22762395772679e-183	7.25521600440376e-177	0.403242	peg2	7.78514468065094e-100	3.81714039970854e-92	0.421001
+cis	rs1939015	G	cg10306192	peg1	1.90285543502298e-190	1.63575435080116e-183	0.492246	peg2	1.16352650586597e-91	3.803263963063e-84	0.530363
+cis	rs2883456	C	cg11144103	peg1	5.06679537113219e-187	3.42223874350835e-180	0.429745	peg2	3.53248196898722e-91	8.66007003606234e-84	0.460901
+cis	rs72660967	T	cg06961873	peg1	6.02441299455294e-156	1.03575495915106e-149	0.404299	peg2	4.4902824016553e-87	8.80653555690919e-80	0.437046
+cis	rs3762352	C	cg24088508	peg1	2.59899202418852e-169	6.14398192883974e-163	-0.3777	peg2	7.15474810507206e-87	1.16935005329171e-79	-0.390806
+cis	rs6142884	A	cg00704664	peg1	1.08394110417597e-153	1.68027677565248e-147	0.366204	peg2	2.50136142729234e-85	3.5041270999555e-78	0.388578
+cis	GSA-rs35850196	A	cg06961873	peg1	2.71839833826451e-154	4.28417122490655e-148	0.402319	peg2	6.74026000425308e-85	8.26205543447358e-78	0.434157
+cis	rs61137192	G	cg22337626	peg1	2.37168470250421e-141	1.54665668976338e-135	0.384497	peg2	5.95694195188303e-84	6.49056196583822e-77	0.40965
+garyc@lupine:~/analysis/PD-QTLs/results/eqtls$ 
+```
+## Top overlapping results
+
+```
+garyc@lupine:~/analysis/PD-QTLs/results/eqtls$ head overlap_meqtls_peg*
+==> overlap_meqtls_peg1.txt <==
+me_qtl_type	snp_id	allele	gene	peg	pvalue	FDR	beta	peg	pvalue	FDR	beta
+cis	GSA-rs1040961	G	cg17707870	peg1	3.19657356478992e-240	3.02266263743662e-232	0.463461	peg2	1.75221926908519e-73	9.04349479281351e-67	0.476207
+cis	rs10010994	C	cg17858192	peg1	1.07333906461107e-224	5.07471800999251e-217	0.38231	peg2	2.87543180201319e-69	8.83254921602953e-63	0.380936
+cis	rs10184015	A	cg02502145	peg1	2.35478400502351e-214	7.42223664073641e-207	0.458667	peg2	3.27733181336013e-71	1.46082830374007e-64	0.477257
+cis	rs2532925	G	cg04145681	peg1	9.42822327913758e-211	2.22881920794558e-203	0.471904	peg2	2.27317819557558e-74	1.31125151237358e-67	0.458799
+cis	exm2267473	G	cg09084244	peg1	2.65120419044779e-207	5.01392862592143e-200	0.422279	peg2	2.66697691072591e-68	5.23059017069958e-62	0.407247
+cis	GSA-rs1035142	T	cg07227024	peg1	3.20562587043044e-203	5.05203741431135e-196	0.428486	peg2	5.38180254456733e-71	2.1989631919515e-64	0.434122
+cis	GSA-rs10750097	G	cg12556569	peg1	1.21710492165548e-201	1.64412545315535e-194	0.385482	peg2	2.47609121473652e-70	9.33887867099282e-64	0.394837
+cis	rs1043793	A	cg02502145	peg1	2.89813128784325e-199	3.42557154739125e-192	0.452316	peg2	7.18611377732221e-44	1.61625187488907e-38	0.429988
+cis	rs8106375	G	cg22996768	peg1	7.34618381232944e-199	7.7183462184694e-192	0.472055	peg2	1.70179415323157e-55	9.11921341179653e-50	0.466453
+
+==> overlap_meqtls_peg2.txt <==
+me_qtl_type	snp_id	allele	gene	peg	pvalue	FDR	beta	peg	pvalue	FDR	beta
+cis	GSA-rs4796640	G	cg25929399	peg1	7.80749012719841e-181	3.35578197621924e-174	0.438301	peg2	1.90294376752955e-111	1.86606770493654e-103	0.499874
+cis	GSA-rs2294942	G	cg05704942	peg1	1.22762395772679e-183	7.25521600440376e-177	0.403242	peg2	7.78514468065094e-100	3.81714039970854e-92	0.421001
+cis	rs1939015	G	cg10306192	peg1	1.90285543502298e-190	1.63575435080116e-183	0.492246	peg2	1.16352650586597e-91	3.803263963063e-84	0.530363
+cis	rs2883456	C	cg11144103	peg1	5.06679537113219e-187	3.42223874350835e-180	0.429745	peg2	3.53248196898722e-91	8.66007003606234e-84	0.460901
+cis	rs72660967	T	cg06961873	peg1	6.02441299455294e-156	1.03575495915106e-149	0.404299	peg2	4.4902824016553e-87	8.80653555690919e-80	0.437046
+cis	rs6142884	A	cg00704664	peg1	1.08394110417597e-153	1.68027677565248e-147	0.366204	peg2	2.50136142729234e-85	3.5041270999555e-78	0.388578
+cis	GSA-rs35850196	A	cg06961873	peg1	2.71839833826451e-154	4.28417122490655e-148	0.402319	peg2	6.74026000425308e-85	8.26205543447358e-78	0.434157
+cis	rs61137192	G	cg22337626	peg1	2.37168470250421e-141	1.54665668976338e-135	0.384497	peg2	5.95694195188303e-84	6.49056196583822e-77	0.40965
+cis	rs1865574	A	cg18584561	peg1	9.14738499362999e-160	1.66340724445189e-153	0.325022	peg2	7.81305755263808e-80	7.66165276376831e-73	0.351741
+garyc@lupine:~/analysis/PD-QTLs/results/eqtls$
+```
 
