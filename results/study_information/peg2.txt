@@ -1,0 +1,11 @@
+PEG 2
+PEG 2
+age
+age
+min(age)	avg(age)	max(age)
+46.4	71.05502428848777	92
+female
+female
+female	count(*)
+1	64
+0	145
