@@ -70,6 +70,18 @@ Now run the script as:
 
 	sql_pd_qtl < ../../bin/create_illumina_annotation.sql
 
+## Import Ethnicity Information
+
+In <repo_root>/rawdata/Ethnicity
+
+    sed 's/"//g' GC_dataset.csv | ../../bin/clip.py ',' 'Pegid,Race_gwas,Race_based_on_Q,K1a,K2a,K3a,K4a' > gc_import.csv
+
+Note Cynthia's note on two subjects with missing data.  The revised file is now gc_import_revised.csv
+
+    sql_pd_qtl < ../../bin/create_ethnicity.sql
+
+
+
 ## Import PEG1 covariates into DB
 
 Loading PEG1 covariates that include blood cell count variables
@@ -295,6 +307,7 @@ cat covariates.tsv |../../../bin/transpose_float 551 11 > covariates_t.tsv
 #cat genotypes.csv |sed 's/\,/\t/g' | ../../../bin/transpose_float 551 64326 > genotypes_t.tsv 
 cat genotypes.csv |sed 's/\,/\t/g' | ../../../bin/transpose_float 551 263704 > genotypes_t.tsv 
 cat methylation.csv |sed 's/\,/\t/g' | ../../../bin/transpose_float 551 485512 > methylation_t.tsv 
+
 ```
 ### PEG1
 in [repo_root]/rawdata/merge/peg2:
@@ -303,6 +316,7 @@ cat covariates.tsv |../../../bin/transpose_float 209 11 > covariates_t.tsv
 #cat genotypes.csv |sed 's/\,/\t/g' | ../../../bin/transpose_float 209 64326 > genotypes_t.tsv 
 cat genotypes.csv |sed 's/\,/\t/g' | ../../../bin/transpose_float 209 272674 > genotypes_t.tsv 
 cat methylation.csv |sed 's/\,/\t/g' | ../../../bin/transpose_float 209 485512 > methylation_t.tsv 
+
 ```
 
 ## cis trans analysis
@@ -335,58 +349,90 @@ sql_pd_qtl < ../../bin/fetch_gwas_map.sql|sed 's/\t/_/' >snp_map.txt
 
 in [repo_root]/rawdata/merge/peg[1|2]:
 
+	R --no-save < ../../../bin/matrix_eqtl.r 1>cis_trans.out 2>cis_trans.err &
+
+post process the results:
+
 ```
-R --no-save < ../../../bin/matrix_eqtl.r
 sed 's/_/\t/' cis_eqtls.raw | sed '1d' | sed 's/^/cis\t/' > cis_eqtls.txt
 sed 's/_/\t/' trans_eqtls.raw | sed '1d' | sed 's/^/trans\t/' > trans_eqtls.txt
 sed 's/_/\t/' all_eqtls.raw | sed '1d' | sed 's/^/all\t/' > all_eqtls.txt
 ```
 
-Load the results and get the BED file:
+load the results:
 
-#### PEG1
-	../../../bin/get_cis_eqtls.sh 1 |sed '1d' |sed 's/^/chr/' > cis_eqtls.bed
-#### PEG2
-	../../../bin/get_cis_eqtls.sh 2 |sed '1d' |sed 's/^/chr/' > cis_eqtls.bed
+	../../../bin/load_all_meqtls.sh
 
-[GO term enrichments](http://www.caseyandgary.com:8099/~garyc/pd_qtl/go_enrichment.html)
+### Ontology enrichment analysis
 
-[Full results from GREAT enrichment for cis-trans](http://www.caseyandgary.com:8099/~garyc/pd_qtl/cis_eqtls.bed)
+For BED file:
 
-### PD disease SNPs for enrichment analysis
 
-Load in the SNPs 
+in [repo_root]/rawdata/merge/peg1:
+	../../../bin/get_cis_eqtls.sh peg1 |sed '1d' |sed 's/^/chr/' > cis_eqtls.bed
+in [repo_root]/rawdata/merge/peg1:
+	../../../bin/get_cis_eqtls.sh peg2 |sed '1d' |sed 's/^/chr/' > cis_eqtls.bed
+
+[GO term enrichments PEG1](http://www.caseyandgary.com:8099/~garyc/pd_qtl/go_enrichment_peg1.html)
+[GO term enrichments PEG2](http://www.caseyandgary.com:8099/~garyc/pd_qtl/go_enrichment_peg2.html)
+
+### PD enrichment analysis
+
+load pd probes in [repo_root]/bin:
+
+	sql_pd_qtl < create_pd_probes.sql
+
+load PD snps in [repo_root]/bin:
+
+	sql_pd_qtl < create_pd_snps.sql
+
+
 
 #### PEG1
 in [repo_root]/rawdata/merge/peg1:
-	../../../bin/fetch_hypergeometric_param.sh 1
+	../../../bin/fetch_hypergeometric_param.sh peg1
+
+So among 263704 QC passed SNPs tested for association on PEG1, 33430 of these were deemed as significant cis meQTLs.  Computing a p-value for the hypergeometic test where alternative hypothesis is observing 1966 or more cis meQTLs among the 11920 PD SNPs.
+
+	#cis
+	> phyper(1966-1, 33430, 263704-33430, 11920,lower.tail=F)
+	[1] 2.681329e-35
+
+So among 263704 QC passed SNPs tested for association on PEG1, 27904 of these were deemed as significant trans meQTLs.  Computing a p-value for the hypergeometic test where alternative hypothesis is observing 1161 or more trans meQTLs among the 11920 PD SNPs.
+
+	#trans
+	> phyper(1161-1, 27904, 263704-27904, 11920,lower.tail=F)
+	[1] 0.9990464
+	
+
 #### PEG2
+
 in [repo_root]/rawdata/merge/peg2:
-	../../../bin/fetch_hypergeometric_param.sh 2
+	../../../bin/fetch_hypergeometric_param.sh peg2
 
-So among 64,326 QC passed SNPs tested for association on PEG, 2,216 of these were deemed as significant meQTLs.  Computing a p-value for the hypergeometic test where alternative hypothesis is observing 120 or more meQTLs among the 2602 PD SNPs.
+So among 272674 QC passed SNPs tested for association on PEG2, 19037 of these were deemed as significant cis meQTLs.  Computing a p-value for the hypergeometic test where alternative hypothesis is observing 1208 or more cis meQTLs among the 12120 PD SNPs.
 
-```
-#cis
-> phyper(120-1, 2216, 64326-2216, 2602,lower.tail=F)
-[1] 0.000834084
-> phyper(353-1,4170,64326-4170,2602,lower.tail=F)
-[1] 2.172357e-40
-#trans
-> phyper(244-1,6605,64326-6605,2602,lower.tail=F)
-[1] 0.9421406
-> phyper(842-1,13596,64326-13596,2602,lower.tail=F)
-[1] 2.272072e-42
-#all
-> phyper(157-1,3681,64326-3681,2602,lower.tail=F)
-[1] 0.2540671
-> phyper(948-1,8409,64326-8409,2602,lower.tail=F)
-[1] 3.100249e-211
-```
- 
+	#cis
+	> phyper(1208-1, 19037, 272674-19037, 12120,lower.tail=F)
+	[1] 5.014762e-36
+
+So among 272674 QC passed SNPs tested for association on PEG2, 29999 of these were deemed as significant trans meQTLs.  Computing a p-value for the hypergeometic test where alternative hypothesis is observing 1293 or more trans meQTLs among the 12120 PD SNPs.
+
+	#trans
+	> phyper(1293,29999,272674-29999,12120,lower.tail=F)
+	[1] 0.8823499
+
 
 # PEG2 pipeline
 
 Repeat PEG1 with peg1 string replaced by peg2
+
+# Manhattan plots
+
+In <repo_root>/results/manhattan, generate the input files for the plots:
+
+	../../bin/fetch_manhattan_plot_input.sh peg1 cis > peg1_cis_input.txt
+
+Do the same for peg2 and trans as well.
 
 
