@@ -2,7 +2,7 @@
 
 sql_pd_qtl  << END
 drop table if exists me_qtls;
-create table me_qtls(peg varchar(10),me_qtl_type varchar(10),snp_id varchar(55), allele varchar(255),gene varchar(55),statistic float,pvalue double,FDR double,beta float,primary key(peg,me_qtl_type,snp_id,allele,gene), index pairing(snp_id,allele,gene));
+create table me_qtls(peg varchar(10),qtl_type varchar(10),snp_id varchar(55), allele varchar(255),gene varchar(55),statistic float,pvalue double,FDR double,beta float,primary key(peg,qtl_type,snp_id,allele,gene), index pairing(snp_id,allele,gene));
 END
 pegs='peg1 peg2'
 meqtl_types='cis trans'
