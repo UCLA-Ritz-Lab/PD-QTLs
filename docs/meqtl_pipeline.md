@@ -140,6 +140,8 @@ In the directory [repo_root]/rawdata/Genetics, run:
 
 This will create three files: snpinfo.txt, subjects.txt and genotypes.txt.  To import these three files into the DB proceed with the following three steps:
 
+
+
 Generate SQL scripts for snpinfo.txt:
 
 	../../bin/make_create_table.py snpinfo '\t' < snpinfo.txt  > ../../bin/create_snpinfo.sql
@@ -156,6 +158,14 @@ load data infile '/home/garyc/analysis/PD-QTLs/rawdata/Genetics/snpinfo.txt' int
 Now import into DB:
 
 	sql_pd_qtl < ../../bin/create_snpinfo.sql
+
+We can now create a pruned snplist for running LDlinkR:
+
+	cut -f2-3 snpinfo.txt |sed 's/\t/:/'|sed 's/^/chr/' > ldlinkr_snplist.txt
+
+Run the R script to generate pruned SNPs:
+	R --no-save < ../../bin/prune_snplist.r
+
 
 Generate SQL scripts for subjects.txt:
 
@@ -187,6 +197,23 @@ Import:
 ### PEG2
 
 	plink2 --vcf PEG_PD.phased.vcf.gz --double-id --vcf-require-gt --geno 0.05  --maf 0.05 -hwe 0.0000001 --keep GWAS.EWAS_209_link_sort.txt --indiv-sort file GWAS.EWAS_209_link_sort.txt --make-bed --out PEG.phased.209
+
+## Annotate the famfiles to have disease status to do GWAS
+
+### PEG1
+
+```
+cp PEG.phased.580.fam PEG.phased.580.fam.bak
+../../bin/annotate_famfile.sh PEG.phased.580.fam.bak |sed '1d' > PEG.phased.580.fam
+../../bin/fetch_gwas_covar.sh PEG.phased.580.fam.bak |sed '1d' |sed 's/NULL/-9/g' > PEG.phased.580.cov
+```
+
+
+## Run GWAS and load
+```
+plink2 --bfile PEG.phased.580 --glm --fam PEG.phased.580.fam --covar PEG.phased.580.cov
+./../bin/load_gwas_results.sh plink2.PHENO1.glm.logistic.hybrid
+```
 
 ## Run shell scripts to filter out probes near SNPs. From [repo_root]/rawdata/Methylation:
 
@@ -294,10 +321,10 @@ Run the script to process the merge
 
 ### PEG1
 in [repo_root]/rawdata/merge/peg1:
-	gunzip -c raw_merge.txt.gz  | ../../../bin/process_merge.py snplist.txt cols subjectlist.txt rows probelist.txt rows
+	gunzip -c raw_merge.txt.gz  | ../../../bin/process_merge.py snplist.txt cols subjectlist.txt rows probelist.txt rows 14
 ### PEG2
 in [repo_root]/rawdata/merge/peg2:
-	gunzip -c raw_merge.txt.gz  | ../../../bin/process_merge.py snplist.txt cols subjectlist.txt rows probelist.txt rows
+	gunzip -c raw_merge.txt.gz  | ../../../bin/process_merge.py snplist.txt cols subjectlist.txt rows probelist.txt rows 14
 
 Transpose the three matrices
 ### PEG1
@@ -365,13 +392,9 @@ load the results:
 
 ### Ontology enrichment analysis
 
-For BED file:
-
-
-in [repo_root]/rawdata/merge/peg1:
-	../../../bin/get_cis_eqtls.sh peg1 |sed '1d' |sed 's/^/chr/' > cis_eqtls.bed
-in [repo_root]/rawdata/merge/peg1:
-	../../../bin/get_cis_eqtls.sh peg2 |sed '1d' |sed 's/^/chr/' > cis_eqtls.bed
+For BED filein [repo_root]/rawdata/merge/peg[1|2]:
+	../../../bin/get_eqtls.sh me_qtls cis peg1 |sed '1d' |sed 's/^/chr/' > cis_eqtls.bed
+	../../../bin/get_eqtls.sh me_qtls cis peg2 |sed '1d' |sed 's/^/chr/' > cis_eqtls.bed
 
 [GO term enrichments PEG1](http://www.caseyandgary.com:8099/~garyc/pd_qtl/go_enrichment_peg1.html)
 [GO term enrichments PEG2](http://www.caseyandgary.com:8099/~garyc/pd_qtl/go_enrichment_peg2.html)
@@ -387,20 +410,22 @@ load PD snps in [repo_root]/bin:
 	sql_pd_qtl < create_pd_snps.sql
 
 
-
 #### PEG1
 in [repo_root]/rawdata/merge/peg1:
-	../../../bin/fetch_hypergeometric_param.sh peg1
+
+#####cis
+	../../../bin/fetch_hypergeometric_param.sh me_qtls cis peg1
 
 So among 263704 QC passed SNPs tested for association on PEG1, 33430 of these were deemed as significant cis meQTLs.  Computing a p-value for the hypergeometic test where alternative hypothesis is observing 1966 or more cis meQTLs among the 11920 PD SNPs.
 
-	#cis
 	> phyper(1966-1, 33430, 263704-33430, 11920,lower.tail=F)
 	[1] 2.681329e-35
 
+#####trans
+	../../../bin/fetch_hypergeometric_param.sh me_qtls trans peg1
+
 So among 263704 QC passed SNPs tested for association on PEG1, 27904 of these were deemed as significant trans meQTLs.  Computing a p-value for the hypergeometic test where alternative hypothesis is observing 1161 or more trans meQTLs among the 11920 PD SNPs.
 
-	#trans
 	> phyper(1161-1, 27904, 263704-27904, 11920,lower.tail=F)
 	[1] 0.9990464
 	
@@ -408,7 +433,8 @@ So among 263704 QC passed SNPs tested for association on PEG1, 27904 of these we
 #### PEG2
 
 in [repo_root]/rawdata/merge/peg2:
-	../../../bin/fetch_hypergeometric_param.sh peg2
+#####cis
+	../../../bin/fetch_hypergeometric_param.sh me_qtls cis peg2
 
 So among 272674 QC passed SNPs tested for association on PEG2, 19037 of these were deemed as significant cis meQTLs.  Computing a p-value for the hypergeometic test where alternative hypothesis is observing 1208 or more cis meQTLs among the 12120 PD SNPs.
 
@@ -416,6 +442,8 @@ So among 272674 QC passed SNPs tested for association on PEG2, 19037 of these we
 	> phyper(1208-1, 19037, 272674-19037, 12120,lower.tail=F)
 	[1] 5.014762e-36
 
+#####trans
+	../../../bin/fetch_hypergeometric_param.sh me_qtls trans peg2
 So among 272674 QC passed SNPs tested for association on PEG2, 29999 of these were deemed as significant trans meQTLs.  Computing a p-value for the hypergeometic test where alternative hypothesis is observing 1293 or more trans meQTLs among the 12120 PD SNPs.
 
 	#trans
@@ -435,4 +463,41 @@ In <repo_root>/results/manhattan, generate the input files for the plots:
 
 Do the same for peg2 and trans as well.
 
+# Filtering on results from earlier studies on meQTLs (molgenis)
+
+In <repo_root>/results/eqtls:
+
+	cut -f2 distinct_meqtls_peg1.txt |sed '1d' > molgenis/meqtls_peg1.txt
+
+In <repo_root>/results/eqtls/molgenis:
+
+	zcat ../../../rawdata/external_qtl/2015_09_02_Primary_cis_meQTLsFDR0.05-ProbeLevel.txt.gz | ../../../bin/filter_eqtls.py whitelist meqtls_peg1.txt > full_cis_meqtl.txt
+
+# coloc analysis
+
+In <repo_root>/rawdata/bin:
+ 
+For cis_trans analysis, set cis p-value threshold in matrix_eqtl.r to one to output all results.
+
+Rerun matrix_eqtl.r
+
+Rename cis_eqtls.txt to cis_eqtls_all_p.txt
+
+	LC_ALL=C sort -b  -k2 cis_eqtls_all_p.txt > cis_eqtls_all_p_sorted.txt.sorted
+
+In <repo_root>/rawdata/Genetics:
+
+	LC_ALL=C sort -b -k3 plink2.PHENO1.glm.logistic.hybrid > plink2.PHENO1.glm.logistic.hybrid.sorted
+
+Join the two files
+
+	LC_ALL=C join -1 3 -2 2 plink2.PHENO1.glm.logistic.hybrid.sorted ../merge/peg1/cis_eqtls_all_p_sorted.txt|  grep ADD  > coloc_merged.txt
+	cat coloc_merged.txt |sort -t\  -k2n -k17d -k3n > coloc_merged_sorted.txt
+
+## getting trans hotspots
+
+in [repo_root]/rawdata/merge/peg[1|2]:
+	
+	../../../bin/get_hotspots.py < trans_eqtls.raw |sed '1d' | sort -k2 -g -r |sed 's/^/trans\tpeg1\t/' > trans_hotspots.txt
+	../../../bin/get_hotspots.py < trans_eqtls.raw |sed '1d' | sort -k2 -g -r |sed 's/^/trans\tpeg2\t/' > trans_hotspots.txt
 

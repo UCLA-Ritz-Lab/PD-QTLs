@@ -24,14 +24,8 @@ def print_info_list(info_list):
 		print(info)
 
 def main():
-	# some constants
-	delimiter = '\t'
-	covariate_start_col = 2
-	covariate_end_col = 12
-	gwas_data_col = 14
-	meth_data_col = 15
-	if(len(sys.argv)<7):
-		print("Usage: process_merge.py [snp_info file] [cols|rows] [subject_info_file] [cols|rows] [probe_info file] [cols|rows]")
+	if(len(sys.argv)<8):
+		print("Usage: process_merge.py [snp_info file] [cols|rows] [subject_info_file] [cols|rows] [probe_info file] [cols|rows] [number of covariates]")
 		exit(1)
 	snp_info_file = sys.argv[1]
 	snp_info_orient = sys.argv[2]
@@ -39,6 +33,17 @@ def main():
 	subject_info_orient = sys.argv[4]
 	probe_info_file = sys.argv[5]
 	probe_info_orient = sys.argv[6]
+	total_covariates = int(sys.argv[7])
+
+	# some constants
+	delimiter = '\t'
+	covariate_start_col = 2
+	covariate_end_col = covariate_start_col+total_covariates-1
+	gwas_data_col = covariate_end_col + 2
+	meth_data_col = gwas_data_col + 1
+
+
+
 	snplist = get_info_list(snp_info_file,snp_info_orient)
 	subjectlist = get_info_list(subject_info_file,subject_info_orient)
 	subjectlist.insert(0,'subject')
