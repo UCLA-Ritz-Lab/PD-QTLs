@@ -159,12 +159,6 @@ Now import into DB:
 
 	sql_pd_qtl < ../../bin/create_snpinfo.sql
 
-We can now create a pruned snplist for running LDlinkR:
-
-	cut -f2-3 snpinfo.txt |sed 's/\t/:/'|sed 's/^/chr/' > ldlinkr_snplist.txt
-
-Run the R script to generate pruned SNPs:
-	R --no-save < ../../bin/prune_snplist.r
 
 
 Generate SQL scripts for subjects.txt:
@@ -211,8 +205,18 @@ cp PEG.phased.580.fam PEG.phased.580.fam.bak
 
 ## Run GWAS and load
 ```
-plink2 --bfile PEG.phased.580 --glm --fam PEG.phased.580.fam --covar PEG.phased.580.cov
-./../bin/load_gwas_results.sh plink2.PHENO1.glm.logistic.hybrid
+#plink2 --bfile PEG.phased.580 --glm --fam PEG.phased.580.fam --covar PEG.phased.580.cov
+#./../bin/load_gwas_results.sh plink2.PHENO1.glm.logistic.hybrid
+plink --bfile PEG.phased.580 --logistic --allow-no-sex  --covar PEG.phased.580.cov
+#TO DO
+#./../bin/load_gwas_results.sh plink2.PHENO1.glm.logistic.hybrid
+
+```
+
+## Clump SNPs
+
+```
+plink --bfile PEG.phased.580 --clump plink.assoc.logistic  --clump-p1 0.001 --clump-p2 0.01 --clump-r2 0.5 --clump-kb 250
 ```
 
 ## Run shell scripts to filter out probes near SNPs. From [repo_root]/rawdata/Methylation:
@@ -393,8 +397,18 @@ load the results:
 ### Ontology enrichment analysis
 
 For BED filein [repo_root]/rawdata/merge/peg[1|2]:
+
 	../../../bin/get_eqtls.sh me_qtls cis peg1 |sed '1d' |sed 's/^/chr/' > cis_eqtls.bed
 	../../../bin/get_eqtls.sh me_qtls cis peg2 |sed '1d' |sed 's/^/chr/' > cis_eqtls.bed
+
+Make sure we install TwoSampleMR package from https://github.com/MRCIEU/TwoSampleMR. We can now create a pruned snplist for running the clump_data function in peg[1|2]:
+
+
+	cut -f1-2 cis_eqtls.bed |sed 's/\t/:/' > ldlinkr_snplist.txt
+
+Run the R script to generate pruned SNPs for peg[1|2]:
+
+	R --no-save < ../../../bin/prune_snplist.r
 
 [GO term enrichments PEG1](http://www.caseyandgary.com:8099/~garyc/pd_qtl/go_enrichment_peg1.html)
 [GO term enrichments PEG2](http://www.caseyandgary.com:8099/~garyc/pd_qtl/go_enrichment_peg2.html)
