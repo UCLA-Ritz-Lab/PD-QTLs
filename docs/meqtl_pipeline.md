@@ -469,6 +469,13 @@ So among 272674 QC passed SNPs tested for association on PEG2, 29999 of these we
 
 Repeat PEG1 with peg1 string replaced by peg2
 
+# get overlapping results
+
+In <repo_root>/results/eqtls:
+
+	../../bin/fetch_all_meqtls_overlap.sh 1 > overlap_meqtls_peg1.txt
+	../../bin/fetch_all_meqtls_overlap.sh 2 > overlap_meqtls_peg2.txt
+
 # Manhattan plots
 
 In <repo_root>/results/manhattan, generate the input files for the plots:
@@ -510,8 +517,12 @@ Join the two files
 
 ## getting trans hotspots
 
-in [repo_root]/rawdata/merge/peg[1|2]:
+
+
+In <repo_root>/results/eqtls:
 	
-	../../../bin/get_hotspots.py < trans_eqtls.raw |sed '1d' | sort -k2 -g -r |sed 's/^/trans\tpeg1\t/' > trans_hotspots.txt
-	../../../bin/get_hotspots.py < trans_eqtls.raw |sed '1d' | sort -k2 -g -r |sed 's/^/trans\tpeg2\t/' > trans_hotspots.txt
+	../../bin/get_hotspots.py < overlap_meqtls_peg1.txt |sed '1d' | sort -k2 -g -r |sed 's/^/trans\tpeg1\t/' > trans_hotspots.peg1
+	../../bin/get_hotspots.py < overlap_meqtls_peg2.txt |sed '1d' | sort -k2 -g -r |sed 's/^/trans\tpeg2\t/' > trans_hotspots.peg2
+#	../../../bin/get_hotspots.py < trans_eqtls.raw |sed '1d' | sort -k2 -g -r |sed 's/^/trans\tpeg1\t/' > trans_hotspots.txt
+#	../../../bin/get_hotspots.py < trans_eqtls.raw |sed '1d' | sort -k2 -g -r |sed 's/^/trans\tpeg2\t/' > trans_hotspots.txt
 
