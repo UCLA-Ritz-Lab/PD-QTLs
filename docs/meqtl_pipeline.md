@@ -521,8 +521,5 @@ Join the two files
 
 In <repo_root>/results/eqtls:
 	
-	../../bin/get_hotspots.py < overlap_meqtls_peg1.txt |sed '1d' | sort -k2 -g -r |sed 's/^/trans\tpeg1\t/' > trans_hotspots.peg1
-	../../bin/get_hotspots.py < overlap_meqtls_peg2.txt |sed '1d' | sort -k2 -g -r |sed 's/^/trans\tpeg2\t/' > trans_hotspots.peg2
-#	../../../bin/get_hotspots.py < trans_eqtls.raw |sed '1d' | sort -k2 -g -r |sed 's/^/trans\tpeg1\t/' > trans_hotspots.txt
-#	../../../bin/get_hotspots.py < trans_eqtls.raw |sed '1d' | sort -k2 -g -r |sed 's/^/trans\tpeg2\t/' > trans_hotspots.txt
+	../../bin/get_hotspots.py < overlap_meqtls_peg1.txt |sort -k2 -g -r  > trans_hotspots_peg1.txt
 
