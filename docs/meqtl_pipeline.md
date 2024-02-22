@@ -469,12 +469,12 @@ So among 272674 QC passed SNPs tested for association on PEG2, 29999 of these we
 
 Repeat PEG1 with peg1 string replaced by peg2
 
-# get overlapping results
+# get overlapping cis results
 
 In <repo_root>/results/eqtls:
 
-	../../bin/fetch_all_meqtls_overlap.sh 1 > overlap_meqtls_peg1.txt
-	../../bin/fetch_all_meqtls_overlap.sh 2 > overlap_meqtls_peg2.txt
+	../../bin/fetch_all_meqtls_overlap.sh 1 > overlap_cistrans_meqtls_peg1-sorted.txt
+	grep ^cis overlap_cistrans_meqtls_peg1-sorted.txt > overlap_cis_meqtls_peg1-sorted.txt
 
 # Manhattan plots
 
@@ -521,5 +521,5 @@ Join the two files
 
 In <repo_root>/results/eqtls:
 	
-	../../bin/get_hotspots.py < overlap_meqtls_peg1.txt |sort -k2 -g -r  > trans_hotspots_peg1.txt
+	../../bin/get_hotspots.py < overlap_cistrans_meqtls_peg1-sorted.txt |sort -k2 -g -r  > overlap_trans_meqtls_peg1-sorted.txt
 
