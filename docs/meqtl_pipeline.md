@@ -394,6 +394,21 @@ load the results:
 
 	../../../bin/load_all_meqtls.sh
 
+### Running METAL for meta analysis
+
+In <repo_root>/rawdata/merge/peg1:
+	../../../bin/fetch_all_meqtls_meta_analysis.sh peg1 cis > metal_cis.txt
+	../../../bin/fetch_all_meqtls_meta_analysis.sh peg1 trans > metal_trans.txt
+In <repo_root>/rawdata/merge/peg2:
+	../../../bin/fetch_all_meqtls_meta_analysis.sh peg2 cis > metal_cis.txt
+	../../../bin/fetch_all_meqtls_meta_analysis.sh peg2 trans > metal_trans.txt
+
+In <repo_root>/rawdata/merge:
+	metal < metal.script
+	cat cis1.metal|sed '1d'|sed 's/^/cis\t/' |sed 's/,/\t/'|sed 's/,/\t/' |cut -f1,2,4,8,9 > metal_import.txt
+	cat trans1.metal|sed '1d'|sed 's/^/trans\t/' |sed 's/,/\t/'|sed 's/,/\t/' |cut -f1,2,4,8,9 >> metal_import.txt
+	../../bin/load_metal_results.sh
+
 ### Ontology enrichment analysis
 
 For BED filein [repo_root]/rawdata/merge/peg[1|2]:
@@ -469,12 +484,20 @@ So among 272674 QC passed SNPs tested for association on PEG2, 29999 of these we
 
 Repeat PEG1 with peg1 string replaced by peg2
 
-# get overlapping cis results
+# get results
+
+## get overlapping cis results
 
 In <repo_root>/results/eqtls:
 
 	../../bin/fetch_all_meqtls_overlap.sh 1 > overlap_cistrans_meqtls_peg1-sorted.txt
 	grep ^cis overlap_cistrans_meqtls_peg1-sorted.txt > overlap_cis_meqtls_peg1-sorted.txt
+
+## getting overlapping trans hotspots
+
+In <repo_root>/results/eqtls:
+	
+	../../bin/get_hotspots.py < overlap_cistrans_meqtls_peg1-sorted.txt |sort -k2 -g -r  > overlap_trans_meqtls_peg1-sorted.txt
 
 # Manhattan plots
 
@@ -515,11 +538,7 @@ Join the two files
 	LC_ALL=C join -1 3 -2 2 plink2.PHENO1.glm.logistic.hybrid.sorted ../merge/peg1/cis_eqtls_all_p_sorted.txt|  grep ADD  > coloc_merged.txt
 	cat coloc_merged.txt |sort -t\  -k2n -k17d -k3n > coloc_merged_sorted.txt
 
-## getting trans hotspots
 
 
 
-In <repo_root>/results/eqtls:
-	
-	../../bin/get_hotspots.py < overlap_cistrans_meqtls_peg1-sorted.txt |sort -k2 -g -r  > overlap_trans_meqtls_peg1-sorted.txt
 
