@@ -18,7 +18,8 @@ gwasResults<-read.table("${peg}_${me_qtl_type}_input.txt",header=T,sep='\t')
 cutoff<-gwasResults[10,4]
 #pdf("${peg}_${me_qtl_type}_output.pdf")
 png("${peg}_${me_qtl_type}_output.png",width=1024,height=768)
-manhattan(gwasResults,highlight=gsa,annotatePval=cutoff,annotateTop=F,main="Association p-values for ${peg} of type ${me_qtl_type}")
+#manhattan(gwasResults,highlight=gsa,annotatePval=cutoff,annotateTop=F,main="Association p-values for ${peg} of type ${me_qtl_type}")
+manhattan(gwasResults,annotatePval=cutoff,annotateTop=F,main="Association p-values for meQTLs of type ${me_qtl_type}")
 dev.off()
 END
 
