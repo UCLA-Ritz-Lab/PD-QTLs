@@ -394,6 +394,13 @@ load the results:
 
 	../../../bin/load_all_meqtls.sh
 
+### Filter cis results
+
+In <repo_root>/results/eqtls:
+	../../bin/fetch_all_meqtls_overlap.sh 1 > overlap_cistrans_meqtls_peg1-sorted.txt
+	grep ^cis overlap_cistrans_meqtls_peg1-sorted.txt > overlap_cis_meqtls_peg1-sorted.txt
+
+
 ### Running METAL for meta analysis
 
 In <repo_root>/rawdata/merge/peg1:
@@ -409,12 +416,28 @@ In <repo_root>/rawdata/merge:
 	cat trans1.metal|sed '1d'|sed 's/^/trans\t/' |sed 's/,/\t/'|sed 's/,/\t/' |cut -f1,2,4,8,9 >> metal_import.txt
 	../../bin/load_metal_results.sh
 
+### Overlap with existing GWAS SNPs
+
+In <repo_root>/results/eqtls:
+	../../bin/fetch_all_meqtls_pd_annot.sh > pdsnps_meqtls_peg1.txt
+
+### Overlap with BIOS repo on meQTLs (molgenis)
+
+In <repo_root>/results/eqtls:
+
+	cut -f2 overlap_cis_meqtls_peg1-sorted.txt |sed '1d' > snplist.tmp
+	zcat 2015_09_02_cis_meQTLsFDR0.05-CpGLevel.txt.gz | ../../bin/filter_eqtls.py whitelist snplist.tmp > molgenis_cis_meqtl.txt
+
 ### Ontology enrichment analysis
 
 For BED filein [repo_root]/rawdata/merge/peg[1|2]:
 
 	../../../bin/get_eqtls.sh me_qtls cis peg1 |sed '1d' |sed 's/^/chr/' > cis_eqtls.bed
 	../../../bin/get_eqtls.sh me_qtls cis peg2 |sed '1d' |sed 's/^/chr/' > cis_eqtls.bed
+
+For BED filein [repo_root]/rawdata/merge:
+
+	../../bin/get_eqtls.sh me_qtls cis all|sed '1d' |sed 's/^/chr/' > cis_eqtls.bed
 
 Make sure we install TwoSampleMR package from https://github.com/MRCIEU/TwoSampleMR. We can now create a pruned snplist for running the clump_data function in peg[1|2]:
 
@@ -427,6 +450,11 @@ Run the R script to generate pruned SNPs for peg[1|2]:
 
 [GO term enrichments PEG1](http://www.caseyandgary.com:8099/~garyc/pd_qtl/go_enrichment_peg1.html)
 [GO term enrichments PEG2](http://www.caseyandgary.com:8099/~garyc/pd_qtl/go_enrichment_peg2.html)
+
+### trans hotspots
+
+In <repo_root>/results/eqtls:
+	../../bin/get_hotspots.py < overlap_cistrans_meqtls_peg1-sorted.txt |sort -k2 -g -r  > overlap_trans_meqtls_peg1-sorted.txt
 
 ### PD enrichment analysis
 
@@ -484,21 +512,6 @@ So among 272674 QC passed SNPs tested for association on PEG2, 29999 of these we
 
 Repeat PEG1 with peg1 string replaced by peg2
 
-# get results
-
-## get overlapping cis results
-
-In <repo_root>/results/eqtls:
-
-	../../bin/fetch_all_meqtls_overlap.sh 1 > overlap_cistrans_meqtls_peg1-sorted.txt
-	grep ^cis overlap_cistrans_meqtls_peg1-sorted.txt > overlap_cis_meqtls_peg1-sorted.txt
-
-## getting overlapping trans hotspots
-
-In <repo_root>/results/eqtls:
-	
-	../../bin/get_hotspots.py < overlap_cistrans_meqtls_peg1-sorted.txt |sort -k2 -g -r  > overlap_trans_meqtls_peg1-sorted.txt
-
 # Manhattan plots
 
 In <repo_root>/results/manhattan, generate the input files for the plots:
@@ -507,15 +520,6 @@ In <repo_root>/results/manhattan, generate the input files for the plots:
 
 Do the same for peg2 and trans as well.
 
-# Filtering on results from earlier studies on meQTLs (molgenis)
-
-In <repo_root>/results/eqtls:
-
-	cut -f2 distinct_meqtls_peg1.txt |sed '1d' > molgenis/meqtls_peg1.txt
-
-In <repo_root>/results/eqtls/molgenis:
-
-	zcat ../../../rawdata/external_qtl/2015_09_02_Primary_cis_meQTLsFDR0.05-ProbeLevel.txt.gz | ../../../bin/filter_eqtls.py whitelist meqtls_peg1.txt > full_cis_meqtl.txt
 
 # coloc analysis
 

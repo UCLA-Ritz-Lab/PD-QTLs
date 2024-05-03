@@ -1,11 +1,18 @@
 PEG 1
-PEG 1
-age
-age
-min(age)	avg(age)	max(age)
-35.1	69.0136114767805	91.9
-female
-female
+format(min(age),3)	format(avg(age),3)	format(max(age),3)
+35.100	69.014	91.900
 female	count(*)
 0	310
 1	241
+race_gwas	format(avg(k1a),3)	format(avg(k2a),3)	format(avg(k3a),3)	format(avg(k4a),3)
+EUR	0.008	0.006	0.980	0.006
+AMR	0.056	0.388	0.554	0.002
+AFR	0.851	0.018	0.124	0.006
+SAS	0.120	0.463	0.416	0.001
+EAS	0.280	0.717	0.002	0.001
+race_q	format(avg(k1a),3)	format(avg(k2a),3)	format(avg(k3a),3)	format(avg(k4a),3)
+White	0.011	0.007	0.976	0.006
+Latino	0.038	0.490	0.470	0.002
+Native American	0.024	0.008	0.965	0.003
+Black	0.689	0.013	0.295	0.004
+Asian	0.280	0.717	0.002	0.001
