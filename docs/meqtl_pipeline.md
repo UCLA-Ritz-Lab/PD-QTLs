@@ -184,13 +184,23 @@ Import:
 
 ##Generate a set of PLINK files based on filtering criteria:
 
-### PEG1
+### Prep subject filter files for plink
 
-	plink2 --vcf PEG_PD.phased.vcf.gz --double-id --vcf-require-gt --geno 0.05  --maf 0.05 -hwe 0.0000001 --keep GWAS.EWAS_580_link_sort.txt --indiv-sort file GWAS.EWAS_580_link_sort.txt --make-bed --out PEG.phased.580
+	echo "select gwas_id,gwas_id from peg_id_gwas_id_mapping as a, peg1_covariates as b where a.peg_id=b.peg_id and b.PDstudyParkinsonsDisease=1 order by gwas_id"|sql_pd_qtl |sed '1d' > GWAS.EWAS_peg1cases_link_sort.txt
+	echo "select gwas_id,gwas_id from peg_id_gwas_id_mapping as a, peg1_covariates as b where a.peg_id=b.peg_id and b.PDstudyParkinsonsDisease=0 order by gwas_id"|sql_pd_qtl |sed '1d' > GWAS.EWAS_peg1controls_link_sort.txt
+	mv GWAS.EWAS_209_link_sort.txt GWAS.EWAS_peg2cases_link_sort.txtt
 
-### PEG2
+### PEG1 cases
 
-	plink2 --vcf PEG_PD.phased.vcf.gz --double-id --vcf-require-gt --geno 0.05  --maf 0.05 -hwe 0.0000001 --keep GWAS.EWAS_209_link_sort.txt --indiv-sort file GWAS.EWAS_209_link_sort.txt --make-bed --out PEG.phased.209
+	plink2 --vcf PEG_PD.phased.vcf.gz --double-id --vcf-require-gt --geno 0.05  --maf 0.05 -hwe 0.0000001 --keep GWAS.EWAS_peg1cases_link_sort.txt --indiv-sort file GWAS.EWAS_peg1cases_link_sort.txt --make-bed --out PEG.phased.peg1cases
+
+### PEG1 controls
+
+	plink2 --vcf PEG_PD.phased.vcf.gz --double-id --vcf-require-gt --geno 0.05  --maf 0.05 -hwe 0.0000001 --keep GWAS.EWAS_peg1controls_link_sort.txt --indiv-sort file GWAS.EWAS_peg1controls_link_sort.txt --make-bed --out PEG.phased.peg1controls
+
+### PEG2 cases
+
+	plink2 --vcf PEG_PD.phased.vcf.gz --double-id --vcf-require-gt --geno 0.05  --maf 0.05 -hwe 0.0000001 --keep GWAS.EWAS_peg2cases_link_sort.txt --indiv-sort file GWAS.EWAS_peg2cases_link_sort.txt --make-bed --out PEG.phased.peg2cases
 
 ## Annotate the famfiles to have disease status to do GWAS
 
@@ -225,10 +235,12 @@ plink --bfile PEG.phased.580 --clump plink.assoc.logistic  --clump-p1 0.001 --cl
 
 ##Generate a new set of PLINK files based on CpG range exclusion for SNPs
 
-### PEG1
-	plink2 --bfile PEG.phased.580 --exclude 'range' METH_exclude_sql.txt --make-bed --out PEG.phased.580.methex
-### PEG2
-	plink2 --bfile PEG.phased.209 --exclude 'range' METH_exclude_sql.txt --make-bed --out PEG.phased.209.methex
+### PEG1 cases
+	plink2 --bfile PEG.phased.peg1cases --exclude 'range' METH_exclude_sql.txt --make-bed --out PEG.phased.peg1cases.methex
+### PEG1 controls
+	plink2 --bfile PEG.phased.peg1controls --exclude 'range' METH_exclude_sql.txt --make-bed --out PEG.phased.peg1controls.methex
+### PEG2 cases
+	plink2 --bfile PEG.phased.peg2cases --exclude 'range' METH_exclude_sql.txt --make-bed --out PEG.phased.peg2cases.methex
 
 # Generate subject major dataset with additive genotypes
 
@@ -238,10 +250,12 @@ plink --bfile PEG.phased.580 --clump plink.assoc.logistic  --clump-p1 0.001 --cl
 
 or
 
-### PEG1
-	plink2 --bfile PEG.phased.580 --recode A --out PEG.phased.580.AD
+### PEG1 cases
+	plink2 --bfile PEG.phased.peg1cases --recode A --out PEG.phased.peg1cases.AD
+### PEG1 controls
+	plink2 --bfile PEG.phased.peg1controls --recode A --out PEG.phased.peg1controls.AD
 ### PEG2
-	plink2 --bfile PEG.phased.209 --recode A --out PEG.phased.209.AD
+	plink2 --bfile PEG.phased.peg2cases --recode A --out PEG.phased.peg2cases.AD
 
 
 ##Make SNP map file
@@ -250,10 +264,12 @@ or
 
 or
 
-### PEG1
-	plink2 --bfile PEG.phased.580 --recode bimbam --out PEG.phased.580.bimbam
-### PEG2
-	plink2 --bfile PEG.phased.209 --recode bimbam --out PEG.phased.209.bimbam
+### PEG1 cases
+	plink2 --bfile PEG.phased.peg1cases --recode bimbam --out PEG.phased.peg1cases.bimbam
+### PEG1 controls
+	plink2 --bfile PEG.phased.peg1controls --recode bimbam --out PEG.phased.peg1controls.bimbam
+### PEG2 cases
+	plink2 --bfile PEG.phased.peg2cases --recode bimbam --out PEG.phased.peg2cases.bimbam
 
 
 ## Concatenate subject's genotypes into a single CSV genotype string:
@@ -263,19 +279,25 @@ or
 
 or
 
-### PEG1
-	cut -f1-6 --complement PEG.phased.580.AD.raw |sed 's/\t/,/g' > b
-	cut -f2  PEG.phased.580.AD.raw |paste - b > gwas_additive_genotypes_580.txt
-### PEG2
-	cut -f1-6 --complement PEG.phased.209.AD.raw |sed 's/\t/,/g' > b
-	cut -f2  PEG.phased.209.AD.raw |paste - b > gwas_additive_genotypes_209.txt
+### PEG1 cases
+	cut -f1-6 --complement PEG.phased.peg1cases.AD.raw |sed 's/\t/,/g' > b
+	cut -f2  PEG.phased.peg1cases.AD.raw |paste - b > gwas_additive_genotypes_peg1cases.txt
+### PEG1 controls
+	cut -f1-6 --complement PEG.phased.peg1controls.AD.raw |sed 's/\t/,/g' > b
+	cut -f2  PEG.phased.peg1controls.AD.raw |paste - b > gwas_additive_genotypes_peg1controls.txt
+### PEG2 cases
+	cut -f1-6 --complement PEG.phased.peg2cases.AD.raw |sed 's/\t/,/g' > b
+	cut -f2  PEG.phased.peg2cases.AD.raw |paste - b > gwas_additive_genotypes_peg2cases.txt
 
 run the script in [repo_root]/bin:
 
-### PEG1
-	./create_gwas_subject_genotypes.sh 580
-### PEG2
-	./create_gwas_subject_genotypes.sh 209
+### 2024-06-27 GKC RESUME WORK HERE
+### PEG1 cases
+	./create_gwas_subject_genotypes.sh peg1cases
+### PEG1 controls
+	./create_gwas_subject_genotypes.sh peg1controls
+### PEG2 cases
+	./create_gwas_subject_genotypes.sh peg2cases
 
 
 ## Dump a merge of PEG1 Methylation data
