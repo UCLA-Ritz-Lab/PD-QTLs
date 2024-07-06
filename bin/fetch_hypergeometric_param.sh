@@ -2,7 +2,7 @@
 
 if [ $# -lt 3 ]
 then
-  echo "Usage: [qtl tablename: me_qtls|m_qtls] [qtl_type: cis|trans|all]  [peg: peg1|peg2]"
+  echo "Usage: [qtl tablename: me_qtls|m_qtls] [qtl_type: cis|trans|all]  [peg: peg1cases|peg1controls|peg2cases]"
   exit 1
 fi
 
@@ -18,7 +18,7 @@ select count(snpid) from all_snps_${peg};
 select "GWAS SNPs that are ${qtl_type} QTLS";
 select count(distinct b.snp_id) from all_snps_${peg} as a,${qtl_tablename} as b where b.peg="${peg}" and b.snp_id=a.snpid and b.qtl_type="${qtl_type}";
 select "PD risk SNPS";
-select count(a.snpid) from pd_snps_nall as a,all_snps_${peg} as b where b.snpid=a.snpid;
+select count(a.snpid) from pd_snps_nall as a,all_snps_${peg} as b,snpinfo as c where a.snpid=c.snpid and c.snpid2=b.snpid;
 select "PD risk SNPS that are ${qtl_type} QTLS";
-select count(distinct b.snp_id) from all_snps_${peg} as a,${qtl_tablename} as b,pd_snps_nall as c where b.peg="${peg}" and  b.snp_id=a.snpid and b.qtl_type="${qtl_type}" and c.snpid=a.snpid;
+select count(distinct b.snp_id) from all_snps_${peg} as a,${qtl_tablename} as b,pd_snps_nall as c,snpinfo as d where b.peg="${peg}" and  b.snp_id=a.snpid and b.qtl_type="${qtl_type}" and c.snpid=d.snpid and  d.snpid2=a.snpid;
 END

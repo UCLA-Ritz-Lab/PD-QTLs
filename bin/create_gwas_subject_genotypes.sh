@@ -2,7 +2,7 @@
 
 if [ $# -lt 1 ]
 then
-  echo "Usage: [580|209] (for PEG1 or PEG2)"
+  echo "Usage: [peg1cases|peg1controls|peg2cases]"
   exit 1
 fi
 samplesize=$1

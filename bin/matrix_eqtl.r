@@ -2,8 +2,8 @@ library(MatrixEQTL)
 
 #analysis_mode='ewas'
 #analysis_mode='kp'
-#analysis_mode='cis_trans'
-analysis_mode='cis_trans_met'
+analysis_mode='cis_trans_meth'
+#analysis_mode='cis_trans_metab'
 
 # from https://slowkow.com/notes/ggplot2-qqplot/
 #
@@ -62,15 +62,15 @@ SNP_file_name
 
 
 # Gene expression (methylation) file name
-if(analysis_mode=='ewas' || analysis_mode=='cis_trans_met'){
+if(analysis_mode=='ewas' || analysis_mode=='cis_trans_metab'){
   if(analysis_mode=='ewas'){
     expression_file_name = paste("methylation_t.tsv", sep="");
-  }else if(analysis_mode=='cis_trans_met'){
+  }else if(analysis_mode=='cis_trans_metab'){
     expression_file_name = paste("metabolites_t.tsv", sep="");
   }
 }else if(analysis_mode=='kp'){
   expression_file_name = paste("methylation_nosnp_probes_t.tsv", sep="");
-}else if(analysis_mode=='cis_trans'){
+}else if(analysis_mode=='cis_trans_meth'){
   snps_location_file_name = paste("../snp_map.txt", sep="");
   gene_location_file_name = paste("../gene_map.txt", sep="")
   ## Run the analysis
@@ -86,7 +86,7 @@ covariates_file_name = paste("covariates_t.tsv", sep="");
 covariates_file_name
 
 # Output file name
-if(analysis_mode=='cis_trans'){
+if(analysis_mode=='cis_trans_meth'){
   output_file_name_cis = tempfile();
   output_file_name_tra = tempfile();
 }else{
@@ -94,11 +94,11 @@ if(analysis_mode=='cis_trans'){
 }
 
 # Only associations significant at this level will be saved
-if(analysis_mode=='ewas'|| analysis_mode=='cis_trans_met'){
+if(analysis_mode=='ewas'|| analysis_mode=='cis_trans_metab'){
   pvOutputThreshold = 1e-8;
 }else if(analysis_mode=='kp'){
   pvOutputThreshold = 1e-6;
-}else if(analysis_mode=='cis_trans' ){
+}else if(analysis_mode=='cis_trans_meth' ){
   pvOutputThreshold_cis = 2e-6;
   #pvOutputThreshold_cis = 1;
   pvOutputThreshold_tra = 1e-6;
@@ -147,7 +147,7 @@ gene
 
 ## Run the analysis
 
-if(analysis_mode=='cis_trans'){
+if(analysis_mode=='cis_trans_meth'){
   me = Matrix_eQTL_main(
   snps = snps,
   gene = gene,
@@ -181,7 +181,7 @@ if(analysis_mode=='cis_trans'){
 }
 
 
-if(analysis_mode=='cis_trans'){
+if(analysis_mode=='cis_trans_meth'){
   unlink(output_file_name_cis);
   unlink(output_file_name_tra);
 }else{
@@ -204,10 +204,10 @@ names(me)
 plot(me)
 
 save(me, file=paste("me",analysis_mode,"RData",sep="."))
-if(analysis_mode=='cis_trans' ){
+if(analysis_mode=='cis_trans_meth' ){
   write.table(me$cis$eqtls,file='cis_eqtls.raw',quote=F,row.names=F,sep='\t')
   write.table(me$trans$eqtls,file='trans_eqtls.raw',quote=F,row.names=F,sep='\t')
-}else if(analysis_mode=='kp'|| analysis_mode=='cis_trans_met'){
+}else if(analysis_mode=='kp'|| analysis_mode=='cis_trans_metab'){
   write.table(me$all$eqtls,file='all_eqtls.raw',quote=F,row.names=F,sep='\t')
 }
 #ps<-me$all$eqtls$pvalue

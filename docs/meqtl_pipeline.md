@@ -291,7 +291,6 @@ or
 
 run the script in [repo_root]/bin:
 
-### 2024-06-27 GKC RESUME WORK HERE
 ### PEG1 cases
 	./create_gwas_subject_genotypes.sh peg1cases
 ### PEG1 controls
@@ -304,73 +303,87 @@ run the script in [repo_root]/bin:
 
 To get a dataset for all subjects that have covariates, genotypes, and methylation data, we run a join on MySQL. 
 
-### PEG1
-In [repo_root]/rawdata/merge/peg1:
-	../../../bin/fetch_raw_matrices_peg.sh 1 580 | gzip -c - > raw_merge.txt.gz
-### PEG2
-In [repo_root]/rawdata/merge/peg2:
-	../../../bin/fetch_raw_matrices_peg.sh 2 209 | gzip -c - > raw_merge.txt.gz
+
+### PEG1 cases
+In [repo_root]/rawdata/merge/peg1cases:
+	../../../bin/fetch_raw_matrices_peg.sh 1 peg1cases 1 | gzip -c - > raw_merge.txt.gz
+
+### PEG1 controls
+In [repo_root]/rawdata/merge/peg1controls:
+	../../../bin/fetch_raw_matrices_peg.sh 1 peg1controls 0 | gzip -c - > raw_merge.txt.gz
+
+### PEG2 cases
+In [repo_root]/rawdata/merge/peg2cases:
+	../../../bin/fetch_raw_matrices_peg.sh 2 peg2cases 1 | gzip -c - > raw_merge.txt.gz
+
+## Extract the SNP lists
 
 Next we must provide the raw_merge.txt.gz file with some metadata including a SNP list, subject list, and probe list.
 
-Get a list of the SNPs in [repo_root]/rawdata/Genetics:
+in [repo_root]/rawdata/Genetics:
 
-	head -n1 PEG.phased.580.methex.AD.raw |cut -f1-6 --complement > ../merge/peg1/snplist.txt
-
-or 
-
-
-### PEG1
-	head -n1 PEG.phased.580.AD.raw |cut -f1-6 --complement > ../merge/peg1/snplist.txt
-### PEG2
-	head -n1 PEG.phased.209.AD.raw |cut -f1-6 --complement > ../merge/peg2/snplist.txt
+### PEG1 cases
+	head -n1 PEG.phased.peg1cases.AD.raw |cut -f1-6 --complement > ../merge/peg1cases/snplist.txt
+### PEG1 controls
+	head -n1 PEG.phased.peg1controls.AD.raw |cut -f1-6 --complement > ../merge/peg1controls/snplist.txt
+### PEG2 cases
+	head -n1 PEG.phased.peg2cases.AD.raw |cut -f1-6 --complement > ../merge/peg2cases/snplist.txt
 
 
-Get a list of the subjects:
+## Get a list of the subjects:
 
-### PEG1
-in [repo_root]/rawdata/merge/peg1:
+### PEG1 cases
+in [repo_root]/rawdata/merge/peg1cases:
 	gunzip -c raw_merge.txt.gz |cut -f1|sed '1d' > subjectlist.txt
-### PEG2
-in [repo_root]/rawdata/merge/peg2:
+### PEG1 controls
+in [repo_root]/rawdata/merge/peg1controls:
+	gunzip -c raw_merge.txt.gz |cut -f1|sed '1d' > subjectlist.txt
+### PEG2 cases
+in [repo_root]/rawdata/merge/peg2cases:
 	gunzip -c raw_merge.txt.gz |cut -f1|sed '1d' > subjectlist.txt
 
-st
-Get a list of the probes in [repo_root]/rawdata/Methylation:
 
-### PEG1
-	cut -f1 datMethPEG1t_probe.tsv  > ../merge/peg1/probelist.txt
-### PEG2
-	cut -f1 datMethPEG2t_probe.tsv  > ../merge/peg2/probelist.txt
+##Get a list of the probes 
 
-Run the script to process the merge 
+in [repo_root]/rawdata/Methylation:
 
-### PEG1
-in [repo_root]/rawdata/merge/peg1:
-	gunzip -c raw_merge.txt.gz  | ../../../bin/process_merge.py snplist.txt cols subjectlist.txt rows probelist.txt rows 14
-### PEG2
-in [repo_root]/rawdata/merge/peg2:
-	gunzip -c raw_merge.txt.gz  | ../../../bin/process_merge.py snplist.txt cols subjectlist.txt rows probelist.txt rows 14
+### PEG1 cases
+	cut -f1 datMethPEG1t_probe.tsv  > ../merge/peg1cases/probelist.txt
+### PEG1 controls
+	cut -f1 datMethPEG1t_probe.tsv  > ../merge/peg1controls/probelist.txt
+### PEG2 cases
+	cut -f1 datMethPEG2t_probe.tsv  > ../merge/peg2cases/probelist.txt
 
-Transpose the three matrices
-### PEG1
-in [repo_root]/rawdata/merge/peg1:
+## Run the script to process the merge 
+
+in [repo_root]/rawdata/merge/[peg1cases|peg1controls|peg2cases]:
+	gunzip -c raw_merge.txt.gz  | ../../../bin/process_merge.py snplist.txt cols subjectlist.txt rows probelist.txt rows 13
+
+## Transpose the three matrices
+
+### PEG1 cases
+in [repo_root]/rawdata/merge/peg1cases:
 ```
-cat covariates.tsv |../../../bin/transpose_float 551 11 > covariates_t.tsv
-#cat genotypes.csv |sed 's/\,/\t/g' | ../../../bin/transpose_float 551 64326 > genotypes_t.tsv 
-cat genotypes.csv |sed 's/\,/\t/g' | ../../../bin/transpose_float 551 263704 > genotypes_t.tsv 
-cat methylation.csv |sed 's/\,/\t/g' | ../../../bin/transpose_float 551 485512 > methylation_t.tsv 
-
+cat covariates.tsv |../../../bin/transpose_float 319 11 > covariates_t.tsv
+cat genotypes.csv |sed 's/\,/\t/g' | ../../../bin/transpose_float 319 267770 > genotypes_t.tsv 
+cat methylation.csv |sed 's/\,/\t/g' | ../../../bin/transpose_float 319 485512 > methylation_t.tsv 
 ```
-### PEG1
-in [repo_root]/rawdata/merge/peg2:
+### PEG1 controls
+in [repo_root]/rawdata/merge/peg1controls:
+```
+cat covariates.tsv |../../../bin/transpose_float 232 11 > covariates_t.tsv
+cat genotypes.csv |sed 's/\,/\t/g' | ../../../bin/transpose_float 232 267770 > genotypes_t.tsv 
+cat methylation.csv |sed 's/\,/\t/g' | ../../../bin/transpose_float 232 485512 > methylation_t.tsv 
+```
+### PEG2 cases
+in [repo_root]/rawdata/merge/peg2cases:
 ```
 cat covariates.tsv |../../../bin/transpose_float 209 11 > covariates_t.tsv
-#cat genotypes.csv |sed 's/\,/\t/g' | ../../../bin/transpose_float 209 64326 > genotypes_t.tsv 
 cat genotypes.csv |sed 's/\,/\t/g' | ../../../bin/transpose_float 209 272674 > genotypes_t.tsv 
 cat methylation.csv |sed 's/\,/\t/g' | ../../../bin/transpose_float 209 485512 > methylation_t.tsv 
 
 ```
+
 
 ## cis trans analysis
 
@@ -381,13 +394,9 @@ These are eligible for eQTL analysis for cis trans. To run
 in [repo_root]/rawdata/Methylation:
 	sql_pd_qtl < ../../bin/fetch_nosnp_probes.sql |sed '1d' > nosnp_probes.txt
 
-To get a methylation dataset that excludes probes with SNPs in it:
+### To get a methylation dataset that excludes probes with SNPs in it:
 
-#### PEG1
-in [repo_root]/rawdata/merge/peg1:
-	../../../bin/filter_probes.py whitelist ../../Methylation/nosnp_probes.txt < methylation_t.tsv > methylation_nosnp_probes_t.tsv
-#### PEG2
-in [repo_root]/rawdata/merge/peg2:
+in [repo_root]/rawdata/merge/[peg1cases|peg1controls|peg2cases]:
 	../../../bin/filter_probes.py whitelist ../../Methylation/nosnp_probes.txt < methylation_t.tsv > methylation_nosnp_probes_t.tsv
 
 ### To get a gene map and snp map file 
@@ -400,85 +409,54 @@ sql_pd_qtl < ../../bin/fetch_gwas_map.sql|sed 's/\t/_/' >snp_map.txt
 
 ### Run the analysis 
 
-in [repo_root]/rawdata/merge/peg[1|2]:
+
+in [repo_root]/rawdata/merge/[peg1cases|peg1controls|peg2cases]:
 
 	R --no-save < ../../../bin/matrix_eqtl.r 1>cis_trans.out 2>cis_trans.err &
 
 post process the results:
 
 ```
-sed 's/_/\t/' cis_eqtls.raw | sed '1d' | sed 's/^/cis\t/' > cis_eqtls.txt
-sed 's/_/\t/' trans_eqtls.raw | sed '1d' | sed 's/^/trans\t/' > trans_eqtls.txt
+#sed 's/_/\t/' cis_eqtls.raw | sed '1d' | sed 's/^/cis\t/' > cis_eqtls.txt
+#sed 's/_/\t/' trans_eqtls.raw | sed '1d' | sed 's/^/trans\t/' > trans_eqtls.txt
 sed 's/_/\t/' all_eqtls.raw | sed '1d' | sed 's/^/all\t/' > all_eqtls.txt
+cat cis_eqtls.raw | sed '1d' | sed 's/^/cis\t/' > cis_eqtls.txt
+cat trans_eqtls.raw | sed '1d' | sed 's/^/trans\t/' > trans_eqtls.txt
+
 ```
 
 load the results:
 
 	../../../bin/load_all_meqtls.sh
 
-### Filter cis results
+Dump all results:
 
 In <repo_root>/results/eqtls:
-	../../bin/fetch_all_meqtls_overlap.sh 1 > overlap_cistrans_meqtls_peg1-sorted.txt
-	grep ^cis overlap_cistrans_meqtls_peg1-sorted.txt > overlap_cis_meqtls_peg1-sorted.txt
+	../../bin/fetch_all_meqtls_distinct.sh > cases_only_cistrans_meqtl.txt
+
+Stratify results by cohort and cis/trans
+	head -n1 cases_only_cistrans_meqtl.txt | cut -f2,5-6,8-11 > peg1cases.header
+	head -n1 cases_only_cistrans_meqtl.txt | cut -f2,5-6,13-16 > peg2cases.header
+
+	grep ^cis cases_only_cistrans_meqtl.txt |grep peg1cases | cut -f2,5-6,8-11 > tmp; cat peg1cases.header tmp >  peg1cases_cis.txt
+	grep ^cis cases_only_cistrans_meqtl.txt |grep peg2cases |  cut -f2,5-6,13-16 >tmp; cat peg2cases.header tmp > peg2cases_cis.txt
+	grep ^trans cases_only_cistrans_meqtl.txt |grep peg1cases | cut -f2,5-6,8-11 > tmp; cat peg1cases.header tmp >peg1cases_trans.txt
+	grep ^trans cases_only_cistrans_meqtl.txt |grep peg2cases | cut -f2,5-6,13-16 > tmp; cat peg2cases.header tmp >peg2cases_trans.txt
 
 
 ### Running METAL for meta analysis
 
-In <repo_root>/rawdata/merge/peg1:
-	../../../bin/fetch_all_meqtls_meta_analysis.sh peg1 cis > metal_cis.txt
-	../../../bin/fetch_all_meqtls_meta_analysis.sh peg1 trans > metal_trans.txt
-In <repo_root>/rawdata/merge/peg2:
-	../../../bin/fetch_all_meqtls_meta_analysis.sh peg2 cis > metal_cis.txt
-	../../../bin/fetch_all_meqtls_meta_analysis.sh peg2 trans > metal_trans.txt
-
-In <repo_root>/rawdata/merge:
+In <repo_root>/results/eqtls:
 	metal < metal.script
-	cat cis1.metal|sed '1d'|sed 's/^/cis\t/' |sed 's/,/\t/'|sed 's/,/\t/' |cut -f1,2,4,8,9 > metal_import.txt
-	cat trans1.metal|sed '1d'|sed 's/^/trans\t/' |sed 's/,/\t/'|sed 's/,/\t/' |cut -f1,2,4,8,9 >> metal_import.txt
+	cat cis1.metal|sed '1d'|sed 's/^/cis\t/' |sed 's/,/\t/' |cut -f1,2,3,7,8 > metal.import 
+	cat trans1.metal|sed '1d'|sed 's/^/trans\t/' |sed 's/,/\t/' |cut -f1,2,3,7,8 >> metal.import 
 	../../bin/load_metal_results.sh
 
-### Overlap with existing GWAS SNPs
-
-In <repo_root>/results/eqtls:
-	../../bin/fetch_all_meqtls_pd_annot.sh > pdsnps_meqtls_peg1.txt
-
-### Overlap with BIOS repo on meQTLs (molgenis)
-
-In <repo_root>/results/eqtls:
-
-	cut -f2 overlap_cis_meqtls_peg1-sorted.txt |sed '1d' > snplist.tmp
-	zcat 2015_09_02_cis_meQTLsFDR0.05-CpGLevel.txt.gz | ../../bin/filter_eqtls.py whitelist snplist.tmp > molgenis_cis_meqtl.txt
-
-### Ontology enrichment analysis
-
-For BED filein [repo_root]/rawdata/merge/peg[1|2]:
-
-	../../../bin/get_eqtls.sh me_qtls cis peg1 |sed '1d' |sed 's/^/chr/' > cis_eqtls.bed
-	../../../bin/get_eqtls.sh me_qtls cis peg2 |sed '1d' |sed 's/^/chr/' > cis_eqtls.bed
-
-For BED filein [repo_root]/rawdata/merge:
-
-	../../bin/get_eqtls.sh me_qtls cis all|sed '1d' |sed 's/^/chr/' > cis_eqtls.bed
-
-Make sure we install TwoSampleMR package from https://github.com/MRCIEU/TwoSampleMR. We can now create a pruned snplist for running the clump_data function in peg[1|2]:
-
-
-	cut -f1-2 cis_eqtls.bed |sed 's/\t/:/' > ldlinkr_snplist.txt
-
-Run the R script to generate pruned SNPs for peg[1|2]:
-
-	R --no-save < ../../../bin/prune_snplist.r
-
-[GO term enrichments PEG1](http://www.caseyandgary.com:8099/~garyc/pd_qtl/go_enrichment_peg1.html)
-[GO term enrichments PEG2](http://www.caseyandgary.com:8099/~garyc/pd_qtl/go_enrichment_peg2.html)
-
-### trans hotspots
-
-In <repo_root>/results/eqtls:
-	../../bin/get_hotspots.py < overlap_cistrans_meqtls_peg1-sorted.txt |sort -k2 -g -r  > overlap_trans_meqtls_peg1-sorted.txt
-
 ### PD enrichment analysis
+
+In [repo_root]/rawdata/Genetics:
+	../../bin/clip.py $'\t' "SNP,Beta_all_studies,SE_all_studies,P_all_studies" < PDNallsP005_TableS2.csv > pdnalls_table_s2_import.tsv
+
 
 load pd probes in [repo_root]/bin:
 
@@ -488,9 +466,16 @@ load PD snps in [repo_root]/bin:
 
 	sql_pd_qtl < create_pd_snps.sql
 
+#### Overlap with existing GWAS SNPs
 
-#### PEG1
-in [repo_root]/rawdata/merge/peg1:
+In <repo_root>/results/eqtls:
+	../../bin/fetch_all_meqtls_pd_annot.sh > pdsnps_meqtls_peg.txt
+
+#### Hypergeometric test
+
+in [repo_root]/rawdata/merge/[peg1cases|peg2cases|peg1controls]:
+
+	../../../bin/row2col.sh < snplist.txt > snplist_t.txt
 
 #####cis
 	../../../bin/fetch_hypergeometric_param.sh me_qtls cis peg1
@@ -499,6 +484,10 @@ So among 263704 QC passed SNPs tested for association on PEG1, 33430 of these we
 
 	> phyper(1966-1, 33430, 263704-33430, 11920,lower.tail=F)
 	[1] 2.681329e-35
+
+## NEW VERSION
+> phyper(1467-1,22968,267770-22968,11920,lower.tail=F)
+[1] 2.687785e-45
 
 #####trans
 	../../../bin/fetch_hypergeometric_param.sh me_qtls trans peg1
@@ -528,6 +517,47 @@ So among 272674 QC passed SNPs tested for association on PEG2, 29999 of these we
 	#trans
 	> phyper(1293,29999,272674-29999,12120,lower.tail=F)
 	[1] 0.8823499
+
+### Overlap with BIOS repo on meQTLs (molgenis)
+
+In <repo_root>/rawdata/external_qtl:
+
+	zcat 2015_09_02_cis_meQTLsFDR0.05-CpGLevel.txt.gz | ../../bin/clip.py $'\t' PValue,SNPName,ProbeName,CisTrans,AlleleAssessed,OverallZScore,FDR > molgenis_import.txt
+	sql_pd_qtl < ../..bin/create_molgenis.sql
+
+In <repo_root>/results/eqtls:
+
+	../../bin/fetch_all_meqtls_molgenis_annot.sh > molgenis_meqtls_peg.txt
+
+
+### GKC
+
+### Ontology enrichment analysis
+
+In [repo_root]/results/great:
+	#../../bin/get_eqtl_positions.sh me_qtls cis peg1cases |sed '1d' | sed 's/^/chr/' > peg1cases_cis_eqtls.bed
+	#../../bin/get_eqtl_positions.sh me_qtls cis peg2cases |sed '1d' | sed 's/^/chr/' > peg2cases_cis_eqtls.bed
+	#../../bin/get_eqtl_positions.sh me_qtls cis all|sed '1d' |sed 's/^/chr/' > cis_eqtls.bed
+	awk  '{print $3"\t"$4"\t"$4}' ../eqtls/cases_only_cistrans_meqtl.txt |sed '1d' |sed 's/^/chr/' > all_cis_eqtls.bed
+
+### Pruning SNPs
+
+Make sure we install TwoSampleMR package from https://github.com/MRCIEU/TwoSampleMR. We can now create a pruned snplist for running the clump_data function in peg[1|2]:
+
+	cut -f1-2 cis_eqtls.bed |sed 's/\t/:/' > ldlinkr_snplist.txt
+
+Run the R script to generate pruned SNPs for peg[1|2]:
+
+	R --no-save < ../../../bin/prune_snplist.r
+
+[GO term enrichments PEG1](http://www.caseyandgary.com:8099/~garyc/pd_qtl/go_enrichment_peg1.html)
+[GO term enrichments PEG2](http://www.caseyandgary.com:8099/~garyc/pd_qtl/go_enrichment_peg2.html)
+
+### trans hotspots
+
+In <repo_root>/results/eqtls:
+	#../../bin/get_hotspots.py < overlap_cistrans_meqtls_peg1-sorted.txt |sort -k2 -g -r  > overlap_trans_meqtls_peg1-sorted.txt
+	../../bin/get_hotspots.py < cases_only_cistrans_meqtl.txt |sort -k2 -g -r > cases_only_trans_meqtl.txt
 
 
 # PEG2 pipeline
