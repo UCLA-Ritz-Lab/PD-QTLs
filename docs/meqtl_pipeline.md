@@ -433,6 +433,9 @@ Dump all results:
 
 In <repo_root>/results/eqtls:
 	../../bin/fetch_all_meqtls_distinct.sh > cases_only_cistrans_meqtl.txt
+	head -n1 cases_only_cistrans_meqtl.txt > allcases.header
+	grep ^cis cases_only_cistrans_meqtl.txt  | sed '1d'|sort -k14 -g | cat allcases.header - > cases_only_cis_meqtls.txt 
+
 
 Stratify results by cohort and cis/trans
 	head -n1 cases_only_cistrans_meqtl.txt | cut -f2,5-6,8-11 > peg1cases.header
@@ -478,20 +481,38 @@ in [repo_root]/rawdata/merge/[peg1cases|peg2cases|peg1controls]:
 	../../../bin/row2col.sh < snplist.txt > snplist_t.txt
 
 #####cis
-	../../../bin/fetch_hypergeometric_param.sh me_qtls cis peg1
+	../../../bin/fetch_hypergeometric_param.sh me_qtls cis peg1cases
 
+in R:
+```
+gwas_snps<- 267770
+gwas_eqtls<- 22968
+pd_snps<- 11920
+pd_qtls<- 1467
+phyper(pd_qtls-1,gwas_eqtls,gwas_snps-gwas_eqtls,pd_snps,lower.tail=F)
+[1] 2.687785e-45
+```
+
+## OLD VERSION
 So among 263704 QC passed SNPs tested for association on PEG1, 33430 of these were deemed as significant cis meQTLs.  Computing a p-value for the hypergeometic test where alternative hypothesis is observing 1966 or more cis meQTLs among the 11920 PD SNPs.
 
 	> phyper(1966-1, 33430, 263704-33430, 11920,lower.tail=F)
 	[1] 2.681329e-35
 
-## NEW VERSION
-> phyper(1467-1,22968,267770-22968,11920,lower.tail=F)
-[1] 2.687785e-45
 
 #####trans
 	../../../bin/fetch_hypergeometric_param.sh me_qtls trans peg1
 
+```
+gwas_snps<-267770
+gwas_eqtls<- 28746
+pd_snps<- 11920
+pd_qtls<- 1059
+phyper(pd_qtls-1,gwas_eqtls,gwas_snps-gwas_eqtls,pd_snps,lower.tail=F)
+1
+```
+
+## OLD VERSION
 So among 263704 QC passed SNPs tested for association on PEG1, 27904 of these were deemed as significant trans meQTLs.  Computing a p-value for the hypergeometic test where alternative hypothesis is observing 1161 or more trans meQTLs among the 11920 PD SNPs.
 
 	> phyper(1161-1, 27904, 263704-27904, 11920,lower.tail=F)
@@ -504,6 +525,18 @@ in [repo_root]/rawdata/merge/peg2:
 #####cis
 	../../../bin/fetch_hypergeometric_param.sh me_qtls cis peg2
 
+```
+gwas_snps<- 272674
+gwas_eqtls<- 18982
+pd_snps<- 12120
+pd_qtls<- 1212
+phyper(pd_qtls-1,gwas_eqtls,gwas_snps-gwas_eqtls,pd_snps,lower.tail=F)
+[1] 2.843806e-37
+
+```
+
+
+### OLD VERSION
 So among 272674 QC passed SNPs tested for association on PEG2, 19037 of these were deemed as significant cis meQTLs.  Computing a p-value for the hypergeometic test where alternative hypothesis is observing 1208 or more cis meQTLs among the 12120 PD SNPs.
 
 	#cis
@@ -511,6 +544,15 @@ So among 272674 QC passed SNPs tested for association on PEG2, 19037 of these we
 	[1] 5.014762e-36
 
 #####trans
+```
+gwas_snps<- 272674
+gwas_eqtls<- 29679
+pd_snps<- 12120
+pd_qtls<- 1233
+phyper(pd_qtls-1,gwas_eqtls,gwas_snps-gwas_eqtls,pd_snps,lower.tail=F)
+[1] 0.9954382
+```
+### OLD VERSION
 	../../../bin/fetch_hypergeometric_param.sh me_qtls trans peg2
 So among 272674 QC passed SNPs tested for association on PEG2, 29999 of these were deemed as significant trans meQTLs.  Computing a p-value for the hypergeometic test where alternative hypothesis is observing 1293 or more trans meQTLs among the 12120 PD SNPs.
 
@@ -557,7 +599,7 @@ Run the R script to generate pruned SNPs for peg[1|2]:
 
 In <repo_root>/results/eqtls:
 	#../../bin/get_hotspots.py < overlap_cistrans_meqtls_peg1-sorted.txt |sort -k2 -g -r  > overlap_trans_meqtls_peg1-sorted.txt
-	../../bin/get_hotspots.py < cases_only_cistrans_meqtl.txt |sort -k2 -g -r > cases_only_trans_meqtl.txt
+	../../bin/get_hotspots.py < cases_only_cistrans_meqtl.txt |sort -k4 -g  > cases_only_trans_meqtl.txt
 
 
 # PEG2 pipeline
@@ -593,8 +635,3 @@ Join the two files
 
 	LC_ALL=C join -1 3 -2 2 plink2.PHENO1.glm.logistic.hybrid.sorted ../merge/peg1/cis_eqtls_all_p_sorted.txt|  grep ADD  > coloc_merged.txt
 	cat coloc_merged.txt |sort -t\  -k2n -k17d -k3n > coloc_merged_sorted.txt
-
-
-
-
-

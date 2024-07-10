@@ -2,7 +2,7 @@
 
 if [ $# -lt 1 ]
 then
-  echo "Usage [peg1|peg2]"
+  echo "Usage [peg1cases|peg2cases]"
   exit 1
 fi
 

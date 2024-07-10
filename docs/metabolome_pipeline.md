@@ -39,8 +39,9 @@ paste a b > metabolite_list.txt
 ```
 Under [repo_root]/rawdata/merge_metabolome/peg1:
 ```
-../../../bin/fetch_raw_metabolome_matrices_peg.sh 1 580 | gzip -c - > raw_merge.txt.gz
-cp ../../merge/peg1/snplist.txt .
+../../../bin/fetch_raw_metabolome_matrices_peg.sh 1 peg1cases 1 | gzip -c - > raw_merge.txt.gz
+### GKC CHECK HERE
+cp ../../merge/peg1cases/snplist.txt .
 zcat raw_merge.txt.gz |cut -f1|sed '1d' > subjectlist.txt
 cp ../../Metabolomics/metabolite_list.txt .
 gunzip -c raw_merge.txt.gz  | ../../../bin/process_merge.py snplist.txt cols subjectlist.txt rows metabolite_list.txt cols 6
