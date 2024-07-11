@@ -37,55 +37,73 @@ head -n1 metabolites_c18.txt  > a
 head -n1 metabolites_hilic.txt  > b
 paste a b > metabolite_list.txt
 ```
-Under [repo_root]/rawdata/merge_metabolome/peg1:
+Under [repo_root]/rawdata/merge_metabolome/[peg1cases|peg2cases|peg1controls]:
 ```
-../../../bin/fetch_raw_metabolome_matrices_peg.sh 1 peg1cases 1 | gzip -c - > raw_merge.txt.gz
 ### GKC CHECK HERE
+../../../bin/fetch_raw_metabolome_matrices_peg.sh 1 peg1cases 1 | gzip -c - > raw_merge.txt.gz
 cp ../../merge/peg1cases/snplist.txt .
+../../../bin/fetch_raw_metabolome_matrices_peg.sh 2 peg2cases 1 | gzip -c - > raw_merge.txt.gz
+cp ../../merge/peg2cases/snplist.txt .
+../../../bin/fetch_raw_metabolome_matrices_peg.sh 1 peg1controls 0 | gzip -c - > raw_merge.txt.gz
+cp ../../merge/peg1controls/snplist.txt .
+covariates=6
 zcat raw_merge.txt.gz |cut -f1|sed '1d' > subjectlist.txt
+subjects=`cat  subjectlist.txt|wc -l`
 cp ../../Metabolomics/metabolite_list.txt .
-gunzip -c raw_merge.txt.gz  | ../../../bin/process_merge.py snplist.txt cols subjectlist.txt rows metabolite_list.txt cols 6
-../../../bin/transpose_float 437 8 < covariates.tsv > covariates_t.tsv
-cat genotypes.csv |sed 's/\,/\t/g' | ../../../bin/transpose_float 437 263704 > genotypes_t.tsv
+gunzip -c raw_merge.txt.gz  | ../../../bin/process_merge.py snplist.txt cols subjectlist.txt rows metabolite_list.txt cols $covariates
+../../../bin/transpose_float $subjects $covariates < covariates.tsv > covariates_t.tsv
+snps=`cat snplist.txt|wc -w`
+subjects=`cat subjectlist.txt|wc -l`
+cat genotypes.csv |sed 's/\,/\t/g' | ../../../bin/transpose_float $subjects $snps > genotypes_t.tsv
 mv methylation.csv metabolites.csv
-cat metabolites.csv |sed 's/\,/\t/g' | ../../../bin/transpose_float 437 5135 > metabolites_t.tsv
-```
-
-Under [repo_root]/rawdata/merge_metabolome/peg2:
-```
-../../../bin/fetch_raw_metabolome_matrices_peg.sh 2 209 | gzip -c - > raw_merge.txt.gz
-cp ../../merge/peg1/snplist.txt .
-zcat raw_merge.txt.gz |cut -f1|sed '1d' > subjectlist.txt
-cp ../../Metabolomics/metabolite_list.txt .
-gunzip -c raw_merge.txt.gz  | ../../../bin/process_merge.py snplist.txt cols subjectlist.txt rows metabolite_list.txt cols 6
-../../../bin/transpose_float 206 8 < covariates.tsv > covariates_t.tsv
-cat genotypes.csv |sed 's/\,/\t/g' | ../../../bin/transpose_float 206 263704 > genotypes_t.tsv
-mv methylation.csv metabolites.csv
-cat metabolites.csv |sed 's/\,/\t/g' | ../../../bin/transpose_float 206 5135 > metabolites_t.tsv
+metabolites=`tail -n1 metabolite_list.txt|wc -w`
+cat metabolites.csv |sed 's/\,/\t/g' | ../../../bin/transpose_float $subjects $metabolites > metabolites_t.tsv
 ```
 	
 ## Run matrix_eqtl
 
 ### all analysis
 
-in [repo_root]/rawdata/merge_metabolome/peg[1|2]:
+in [repo_root]/rawdata/merge_metabolome/[peg1cases|peg2cases|peg1controls]:
 
         R --no-save < ../../../bin/matrix_eqtl.r 1>cis_trans.out 2>cis_trans.err &
 
-post process the results in [repo_root]/rawdata/merge_metabolome/peg[1|2]:
-	sed 's/_/\t/' all_eqtls.raw | sed '1d' | sed 's/^/all\t/' > all_eqtls.txt
+post process the results in [repo_root]/rawdata/merge_metabolome/[peg1cases|peg2cases]:
+	cat all_eqtls.raw | sed '1d' | sed 's/^/all\t/' > all_eqtls.txt
 
 
 load the results in [repo_root]/rawdata/merge_metabolome:
 
         ../../bin/load_all_mqtls.sh
 
+Dump all results:
+
+In <repo_root>/results/met_qtls:
+	../../bin/fetch_all_metqtls_distinct.sh > cases_only_cistrans_meqtl.txt
+
+Stratify results by cohort and cis/trans
+        head -n1 cases_only_cistrans_meqtl.txt | cut -f2,5-6,8-11 > peg1cases.header
+        head -n1 cases_only_cistrans_meqtl.txt | cut -f2,5-6,13-16 > peg2cases.header
+	grep ^all cases_only_cistrans_meqtl.txt |grep peg1cases | cut -f2,5-6,8-11 > tmp; cat peg1cases.header tmp >  peg1cases_all.txt
+        grep ^all cases_only_cistrans_meqtl.txt |grep peg2cases |  cut -f2,5-6,13-16 >tmp; cat peg2cases.header tmp > peg2cases_all.txt
+### Running METAL for meta analysis
+
+
+In <repo_root>/results/met_qtls:
+        metal < metal.script
+        cat all1.metal|sed '1d'|sed 's/^/all\t/' |sed 's/,/\t/' |cut -f1,2,3,7,8 > metal.import
+        ../../bin/append_metab_metal_results.sh
+
+
+
 ### Ontology enrichment analysis
 
-For BED file in [repo_root]/rawdata/merge_metabolome/peg[1|2]:
-        ../../../bin/get_eqtls.sh m_qtls all peg1 |sed '1d' |sed 's/^/chr/' > cis_eqtls.bed
-        ../../../bin/get_eqtls.sh m_qtls all peg2 |sed '1d' |sed 's/^/chr/' > cis_eqtls.bed
+```
+#For BED file in [repo_root]/rawdata/merge_metabolome/[peg1cases|peg2cases]:
+#        ../../../bin/get_eqtls.sh met_qtls all peg1cases |sed '1d' |sed 's/^/chr/' > cis_eqtls.bed
+#        ../../../bin/get_eqtls.sh met_qtls all peg2cases |sed '1d' |sed 's/^/chr/' > cis_eqtls.bed
 
+```
 ### PD enrichment analysis
 
 #### PEG1
@@ -122,6 +140,6 @@ in [repo_root]/rawdata/merge_metabolome/peg[1|2]:
 
 ## getting meQTL metQTL overlap
 
-in [repo_root]/results/eqtls
-	../../bin/fetch_methyl_metab_qtl_overlap.sh peg1 > meqtl_metqtl_overlap_peg1.txt
+in [repo_root]/results/met_qtls
+	../../bin/fetch_methyl_metab_qtl_overlap.sh peg1cases > meqtl_metqtl_overlap_peg1cases.txt
 	../../bin/fetch_methyl_metab_qtl_overlap.sh peg2 > meqtl_metqtl_overlap_peg2.txt

@@ -2,8 +2,8 @@ library(MatrixEQTL)
 
 #analysis_mode='ewas'
 #analysis_mode='kp'
-analysis_mode='cis_trans_meth'
-#analysis_mode='cis_trans_metab'
+#analysis_mode='cis_trans_meth'
+analysis_mode<-'cis_trans_metab'
 
 # from https://slowkow.com/notes/ggplot2-qqplot/
 #
