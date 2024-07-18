@@ -475,6 +475,15 @@ In <repo_root>/results/eqtls:
 	../../bin/fetch_all_meqtls_pd_annot.sh > pdsnps_meqtls_peg.txt
 
 #### Hypergeometric test
+```
+> phyper(15, 150, 400-150, 50)
+[1] 0.1549789
+> fisher.test(matrix(c(15, 50-15, 150-15, 400 - 50 - 150 + 15), nr = 2),
+              alternative = "less")$p.value
+[1] 0.1549789
+
+https://stats.stackexchange.com/questions/288081/use-fishers-exact-test-or-a-hypergeometric-test
+```
 
 in [repo_root]/rawdata/merge/[peg1cases|peg2cases|peg1controls]:
 
@@ -491,6 +500,14 @@ pd_snps<- 11920
 pd_qtls<- 1467
 phyper(pd_qtls-1,gwas_eqtls,gwas_snps-gwas_eqtls,pd_snps,lower.tail=F)
 [1] 2.687785e-45
+#odds ratio
+((pd_qtls/pd_snps)/(1-pd_qtls/pd_snps))/((gwas_eqtls/gwas_snps)/(1-gwas_eqtls/gwas_snps))
+fisher.test(matrix(c(pd_qtls-1, pd_snps-pd_qtls-1, gwas_eqtls-pd_qtls-1, gwas_snps-gwas_eqtls-pd_snps+pd_qtls-1), nr = 2), alternative = "greater")$p.value
+
+> phyper(15, 150, 400-150, 50)
+[1] 0.1549789
+> fisher.test(matrix(c(15, 50-15, 150-15, 400 - 50 - 150 + 15), nr = 2),
+              alternative = "less")$p.value
 ```
 
 ## OLD VERSION
@@ -532,6 +549,8 @@ pd_snps<- 12120
 pd_qtls<- 1212
 phyper(pd_qtls-1,gwas_eqtls,gwas_snps-gwas_eqtls,pd_snps,lower.tail=F)
 [1] 2.843806e-37
+#odds ratio
+((pd_qtls/pd_snps)/(1-pd_qtls/pd_snps))/((gwas_eqtls/gwas_snps)/(1-gwas_eqtls/gwas_snps))
 
 ```
 
