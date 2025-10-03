@@ -1,0 +1,189 @@
+---
+title: "Pipeline to create analysis ready methylation data from PPMI idat files"
+output:
+  html_document:
+    df_print: paged
+---
+Under **../rawdata**:
+
+Download the idat files from [PPMI repository](https://www.ppmi-info.org/access-data-specimens/download-data) and save to a folder called **PPMI_EPIC/idats**
+
+Download and save in **PPMI_EPIC/** the linkage file **ppmi_140_link_list_20210607.csv** and the covariate file **Participant_Status_16Jul2025.csv** from the [PPMI Box folder](https://app.box.com/folder/344303646736)
+
+The first step is to generate the sample sheets within each of the idat folders.  Be sure you have installed pandas in your Python environment. Run the following Python code:
+
+```{python eval=FALSE}
+import sys
+import glob
+import pandas as pd
+
+basedir='../rawdata/PPMI_EPIC/'
+
+df_link = pd.read_csv(basedir+'ppmi_140_link_list_20210607.csv')
+df_link['PATNO'] = df_link['PATNO'].astype('str')
+
+df_cov = pd.read_csv(basedir+'Participant_Status_16Jul2025.csv')
+df_cov['PATNO'] = df_cov['PATNO'].astype('str')
+
+df_sample_pheno = pd.merge(df_cov,df_link,on='PATNO')[['PATNO','SENTRIXID','POSITION','COHORT_DEFINITION','EVENT_ID']]
+phenos = ["Parkinson's Disease","Healthy Control"]
+df_sample_pheno['SENTRIXID'] = df_sample_pheno['SENTRIXID'].astype(str)
+df_sample_pheno['SAMPLE_GROUP'] = df_sample_pheno['COHORT_DEFINITION']+'_'+df_sample_pheno['EVENT_ID']
+print(df_sample_pheno)
+idat_files = glob.glob(basedir+"idats/*")
+
+list_sentrix = []
+list_pos = []
+for direc in idat_files:
+    sentrix = direc.split('/')[-1]
+    #print(f'direc {direc} sentrix {sentrix}')
+    #sentrix,pos,_ = fname2.split('_')
+    #print(f"Filename {sentrix} {pos}")
+    df_sample_pheno2 = df_sample_pheno.loc[(df_sample_pheno.SENTRIXID==sentrix) ,:]
+    print(f'df_sample_pheno2\n{df_sample_pheno2}')
+    if len(df_sample_pheno2) > 0:
+        df_sample_pheno2 = df_sample_pheno2.rename(columns={'PATNO':'Sample_Name','SENTRIXID':'Sentrix_ID','POSITION':'Sentrix_Position','SAMPLE_GROUP':'Sample_Group'})
+        df_sample_pheno2 = df_sample_pheno2.drop(['COHORT_DEFINITION','EVENT_ID'],axis=1)
+        df_sample_pheno2.to_csv(basedir+direc+'/sample_sheet.csv',index=False)
+
+
+```
+
+Next we now will undertake a time-consuming step but memory efficient step of generating various matrices for each set of idat files in each idat folder by running the following R script:
+
+```{r eval=FALSE}
+library(ChAMP)
+setwd('../rawdata/PPMI_EPIC/')
+dirs <- list.dirs(path='idats')
+for (dir in dirs){
+  print(dir)
+  csvfile=paste(dir,'sample_sheet.csv',sep='/')
+  if (file.exists(csvfile)){
+    print(csvfile)
+    print('exists')
+    myImport<- champ.import(dir,arraytype="EPIC")
+    write.table(colnames(myImport$beta),file=paste(dir,'beta_cols.txt',sep='/'),row.names=F,col.names=F,quote=F,sep='\t')
+    write.table(rownames(myImport$beta),file=paste(dir,'beta_row.txt',sep='/'),row.names=F,col.names=F,quote=F,sep='\t')
+    write.table(myImport$beta,file=paste(dir,'beta_vals.txt',sep='/'),row.names=F,col.names=F,quote=F,sep='\t')
+    write.table(colnames(myImport$M),file=paste(dir,'M_cols.txt',sep='/'),row.names=F,col.names=F,quote=F,sep='\t')
+    write.table(rownames(myImport$M),file=paste(dir,'M_row.txt',sep='/'),row.names=F,col.names=F,quote=F,sep='\t')
+    write.table(myImport$M,file=paste(dir,'M_vals.txt',sep='/'),row.names=F,col.names=F,quote=F,sep='\t')
+    write.table(colnames(myImport$pd),file=paste(dir,'pd_cols.txt',sep='/'),row.names=F,col.names=F,quote=F,sep='\t')
+    write.table(rownames(myImport$pd),file=paste(dir,'pd_row.txt',sep='/'),row.names=F,col.names=F,quote=F,sep='\t')
+    write.table(myImport$pd,file=paste(dir,'pd_vals.txt',sep='/'),row.names=F,col.names=F,quote=F,sep='\t')
+    write.table(colnames(myImport$intensity),file=paste(dir,'intensity_cols.txt',sep='/'),row.names=F,col.names=F,quote=F,sep='\t')
+    write.table(rownames(myImport$intensity),file=paste(dir,'intensity_row.txt',sep='/'),row.names=F,col.names=F,quote=F,sep='\t')
+    write.table(myImport$intensity,file=paste(dir,'intensity_vals.txt',sep='/'),row.names=F,col.names=F,quote=F,sep='\t')
+    write.table(colnames(myImport$detP),file=paste(dir,'detP_cols.txt',sep='/'),row.names=F,col.names=F,quote=F,sep='\t')
+    write.table(rownames(myImport$detP),file=paste(dir,'detP_row.txt',sep='/'),row.names=F,col.names=F,quote=F,sep='\t')
+    write.table(myImport$detP,file=paste(dir,'detP_vals.txt',sep='/'),row.names=F,col.names=F,quote=F,sep='\t')
+    write.table(colnames(myImport$beadcount),file=paste(dir,'beadcount_cols.txt',sep='/'),row.names=F,col.names=F,quote=F,sep='\t')
+    write.table(rownames(myImport$beadcount),file=paste(dir,'beadcount_row.txt',sep='/'),row.names=F,col.names=F,quote=F,sep='\t')
+    write.table(myImport$beadcount,file=paste(dir,'beadcount_vals.txt',sep='/'),row.names=F,col.names=F,quote=F,sep='\t')
+    write.table(colnames(myImport$Meth),file=paste(dir,'Meth_cols.txt',sep='/'),row.names=F,col.names=F,quote=F,sep='\t')
+    write.table(rownames(myImport$Meth),file=paste(dir,'Meth_row.txt',sep='/'),row.names=F,col.names=F,quote=F,sep='\t')
+    write.table(myImport$Meth,file=paste(dir,'Meth_vals.txt',sep='/'),row.names=F,col.names=F,quote=F,sep='\t')
+    write.table(colnames(myImport$UnMeth),file=paste(dir,'UnMeth_cols.txt',sep='/'),row.names=F,col.names=F,quote=F,sep='\t')
+    write.table(rownames(myImport$UnMeth),file=paste(dir,'UnMeth_row.txt',sep='/'),row.names=F,col.names=F,quote=F,sep='\t')
+    write.table(myImport$UnMeth,file=paste(dir,'UnMeth_vals.txt',sep='/'),row.names=F,col.names=F,quote=F,sep='\t')
+    #save(myLoad,file=paste(dir,'myLoad.RData',sep='/'))
+  }else{
+    print('not exists')
+  }
+  #csv = list.files(path=csvfile)
+}
+#idatDir='idats/203286230019'
+#myLoad <- champ.load(idatDir,arraytype="EPIC")
+#save(myLoad,file=paste(idatDir,'myLoad.RData',sep='/'))
+
+```
+
+Next we want to concatenate the results by running this Python script:
+```{python eval=FALSE}
+basedir='../rawdata/PPMI_EPIC/'
+import pandas as pd
+import glob
+matrices=['beta','M','pd','intensity','detP','beadcount','Meth','UnMeth']
+samplesheets = ['pd']
+
+def merge_files(pd_file,rows_file,vals_filelist,outfilename):
+    fileout = open(outfilename,'w')    
+    with open(pd_file,'r') as file:
+        file.readline()
+        colnames = [line.strip().split('\t')[0] for line in file.readlines()]
+        fileout.write('\t'.join(colnames))
+    fileout.write('\n')    
+    
+    with open(rows_file,'r') as file:
+        rownames = [line.strip() for line in file.readlines()]    
+    filehandles = []
+    for filename in vals_filelist:
+        filehandles.append(open(filename,'r'))
+    for index,rowname in enumerate(rownames):
+        fileout.write(rowname)
+        totalcols=0
+        for index2,filehandle in enumerate(filehandles):
+            fileout.write('\t')
+            linein = filehandle.readline().strip()
+            #print(f"index {index2} linein {linein}")
+            cols = len(linein.split('\t'))
+            totalcols+=cols
+            fileout.write(linein)
+        fileout.write('\n')
+        #print(f"total cols {totalcols}")
+        if index % 5000 == 0:
+            print(f"Row {index} completed")        
+    for filehandle in filehandles:
+        filehandle.close()
+    fileout.close()
+
+def merge_samplesheets(cols_file,vals_filelist,outfilename):
+    with open(cols_file,'r') as file:
+        colnames = [line.strip() for line in file.readlines()]
+    fileout = open(outfilename,'w')    
+    for index,colname in enumerate(colnames):
+        if index>0:
+            fileout.write('\t')
+        fileout.write(colname)
+    fileout.write('\n')
+    for filename in vals_filelist:
+        with open(filename,'r') as file:
+            for line in file:
+                linetokens = line.strip().split('\t')
+                samplegroupvisit = linetokens[3]
+                samplegroup,visit = samplegroupvisit.split('_')                                
+                samplegroup = samplegroup.replace("'","").replace(" ",".")
+                fileout.write(linetokens[0]+'_'+visit+'\t'+linetokens[1]+'\t'+linetokens[2]+'\t'+samplegroup+'.'+visit)
+                fileout.write('\n')
+    fileout.close()
+    
+        
+    
+sentrixlist = glob.glob("idats/*")
+
+def process_datasets(datasets,orientation):
+    for matrix in datasets:    
+        cols_filelist=[]
+        vals_filelist=[]
+        for index,sentrix in enumerate(sentrixlist):
+            if index==0:                
+                    rows_file=basedir+sentrix+'/'+matrix+'_row.txt'
+            #print(f"sentrix {index} {sentrix}")            
+            cols_file=basedir+sentrix+'/'+matrix+'_cols.txt'
+            cols_filelist.append(cols_file)
+            vals_file=basedir+sentrix+'/'+matrix+'_vals.txt'
+            vals_filelist.append(vals_file)
+        outfilename=basedir+matrix+'.txt'
+        print(f"Output to {outfilename}")
+        #print(f"{cols_file} {rows_file} {outfilename} {vals_filelist} ")
+        if orientation == 'vertical':
+            merge_samplesheets(cols_file,vals_filelist,outfilename)
+        elif orientation == 'horizontal':
+            merge_files('pd.txt',rows_file,vals_filelist, outfilename)
+            
+            
+process_datasets(samplesheets,'vertical')
+process_datasets(matrices,'horizontal')
+```
+
+Under **PPMI_EPIC/** you should see new files such as **beta.txt** (the Beta values in cpg-major format) and **pd.txt** (A sample sheet that is useful for the ChAMP pipeline).  A gzipped copy of **beta.txt** called **ppmi_betas.txt.gz** is located at the [PPMI Box folder](https://app.box.com/folder/344303646736).
