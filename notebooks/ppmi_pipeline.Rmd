@@ -1,9 +1,8 @@
 ---
 title: "Pipeline to create analysis ready methylation data from PPMI idat files"
-output:
-  html_document:
-    df_print: paged
+output: html_notebook
 ---
+
 Under **../rawdata**:
 
 Download the idat files from [PPMI repository](https://www.ppmi-info.org/access-data-specimens/download-data) and save to a folder called **PPMI_EPIC/idats**
