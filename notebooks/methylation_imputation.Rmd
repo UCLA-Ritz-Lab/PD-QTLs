@@ -1,6 +1,8 @@
 ---
 title: "Imputation of PEG methylation data to PPMI reference panel"
-output: html_notebook
+output:
+  pdf_document: default
+  html_notebook: default
 ---
 ```{r, setup, include=FALSE}
 # We assume we're in the notebooks directory
@@ -35,7 +37,7 @@ filename_data_ppmi='data_ppmi.txt'
 filename_data_peg1='data_peg1.txt'
 filename_data_peg2='data_peg2.txt'
 cpg2chr={}
-
+pheno_listnames<-c('ppmi','peg1','pegall')
 peg1_samples=[]
 peg2_samples=[]
 ppmi_samples=[]
@@ -467,66 +469,88 @@ get_deltas<-function(is_imputed,truth,imputed){
   return(delta)
 }
 
-pheno_listnames<-c('ppmi','peg1','pegall')
-pheno_list<-get_pheno_data()
-
-
-for (chrom in chroms){
-  if (is_local || chrom==selected_chr){
-    myImport<-list('beta')
-    print(paste("Chromosome",chrom,sep=' '))
-    infilename<-paste('chunks/merged_',chrom,'.rds',sep='')
-    
-    # load from file
-    raw<-readRDS(infilename)
-    #df_epic_450k<-get_epic_450k(chrom)
-    #myImport$beta<-raw[df_epic_450k$epic_ID,]
-    # filter out nonCPGs using CHAMP
-    #merged_all<-filter_cpgs(raw_epic_450k,'EPIC',pheno_list)
-    
-    df_450k<-get_450k(chrom)
-    myImport$beta<-raw[df_450k$`450k_ID`,]
-    merged_450k<-filter_cpgs(myImport,'450K',pheno_list)
-    isdefined<-!is.na(apply(merged_450k,1,sum))
-    merged_450k<-merged_450k[isdefined,]
-    blanked_450k<-add_blanks(merged_450k)
-    cpgmatrix_is_blanked<-!is.na(merged_450k) & is.na(blanked_450k)
-    #cpgmatrix_is_blanked_peg<-cpgmatrix_is_blanked[,c(peg1_indices,peg2_indices)]
-    # get the join of epic and 450k
-    
-    cpg_lists<-get_cpg_lists(df_epic_450k,merged)
-    cpg_listnames<-c('typed','imputed')
-    for (rank in ranks){
-      for (lambda in lambdas){
-        if (is_local || (rank==selected_rank && lambda==selected_lambda)){
-          plotdir<-paste('plots',label1,sep='/')
-          if (!dir.exists(plotdir)){ 
-            dir.create(plotdir)
+compute_r_squared<-function(){
+  for (chrom in chroms){
+    if (is_local || chrom==selected_chr){
+      myImport<-list('beta')
+      print(paste("Chromosome",chrom,sep=' '))
+      infilename<-paste('chunks/merged_',chrom,'.rds',sep='')
+      # load from file
+      raw<-readRDS(infilename)
+      df_450k<-get_450k(chrom)
+      myImport$beta<-raw[df_450k$`450k_ID`,]
+      merged_450k<-filter_cpgs(myImport,'450K',pheno_list)
+      isdefined<-!is.na(apply(merged_450k,1,sum))
+      merged_450k<-merged_450k[isdefined,]
+      blanked_450k<-add_blanks(merged_450k)
+      cpgmatrix_is_blanked<-!is.na(merged_450k) & is.na(blanked_450k)
+      for (rank in ranks){
+        for (lambda in lambdas){
+          if (is_local || (rank==selected_rank && lambda==selected_lambda)){
+            label1<-paste('chrom',chrom,'rank',rank,'lambda',lambda,'',sep='_')
+            plotdir<-paste('plots',label1,sep='/')
+            if (!dir.exists(plotdir)){ 
+              dir.create(plotdir)
+            }
+            print(paste("Label",label1,sep=" "))
+            completed_450k<-svd_impute(blanked_450k,rank,lambda)
+            delta_matrix<-cpgmatrix_is_blanked * (merged_450k - completed_450k) *(merged_450k - completed_450k)
+            total_blanked<-sum(cpgmatrix_is_blanked)
+            sse<-sum(delta_matrix)/total_blanked
+            mean<-sum(cpgmatrix_is_blanked * merged_450k)/total_blanked
+            sst<-sum(cpgmatrix_is_blanked * (merged_450k-mean)*(merged_450k-mean))
+            rsquared<- 1-(sse/sst)
+            label1<-paste(label1,rsquared,sep=':')
+            cat('\n')
+            cat(label1)
+            cat('\n')
           }
-          print(paste("Label",label1,sep=" "))
-          
-          completed_450k<-svd_impute(blanked_450k,rank,lambda)
-          
-          delta_matrix<-cpgmatrix_is_blanked * (merged_450k - completed_450k) *(merged_450k - completed_450k)
-          total_blanked<-sum(cpgmatrix_is_blanked)
-          sse<-sum(delta_matrix)
-          #delta_matrix<-mapply(get_deltas,cpgmatrix_is_blanked_peg,merged_450k[,c(peg1_indices,peg2_indices)],completed_450k[,c(peg1_indices,peg2_indices)])
-          
-          
-          completed<-svd_impute(merged,rank,lambda)
-          plot_densities(df_epic_450k,completed,plotdir)
-          all_pheno<-rbind(pheno_list[[1]],pheno_list[[3]])
-          corrected<-batch_correct(completed,all_pheno,plotdir,label1)
-          if (rank==optimal_rank && lambda==optimal_lambda){
-            outfilename=paste('imputed/corrected_',chrom,'.rds',sep='')
-            saveRDS(corrected,file=outfilename)
-          }
-          for (i in 1:length(pheno_listnames)){
-            for (j in 1:length(cpg_listnames)){
-              print(paste('pheno',pheno_listnames[i],'cpglist',cpg_listnames[j],sep=' '))
-              myDMP<-dmp_subset(corrected,pheno_list[[i]], cpg_lists[[j]])
-              subset_name<-paste(pheno_listnames[i],cpg_listnames[j],sep='_')
-              gg_qqplot(myDMP[[1]]$P.Value,plotdir=plotdir,label=subset_name)
+        }
+      }
+    }
+  }
+}
+
+impute<-function(){
+  for (chrom in chroms){
+    if (is_local || chrom==selected_chr){
+      myImport<-list('beta')
+      print(paste("Chromosome",chrom,sep=' '))
+      infilename<-paste('chunks/merged_',chrom,'.rds',sep='')
+      # load from file
+      raw<-readRDS(infilename)
+      df_epic_450k<-get_epic_450k(chrom)
+      myImport$beta<-raw[df_epic_450k$epic_ID,]
+      # filter out nonCPGs using CHAMP
+      merged_all<-filter_cpgs(myImport,'EPIC',pheno_list)
+      #cpgmatrix_is_blanked_peg<-cpgmatrix_is_blanked[,c(peg1_indices,peg2_indices)]
+      # get the join of epic and 450k
+      cpg_lists<-get_cpg_lists(df_epic_450k,merged_all)
+      cpg_listnames<-c('typed','imputed')
+      for (rank in ranks){
+        for (lambda in lambdas){
+          if (is_local || (rank==selected_rank && lambda==selected_lambda)){
+            label1<-paste('chrom',chrom,'rank',rank,'lambda',lambda,'',sep='_')
+            plotdir<-paste('plots',label1,sep='/')
+            if (!dir.exists(plotdir)){ 
+              dir.create(plotdir)
+            }
+            print(paste("Label",label1,sep=" "))
+            completed<-svd_impute(merged_all,rank,lambda)
+            plot_densities(df_epic_450k,completed,plotdir)
+            all_pheno<-rbind(pheno_list[[1]],pheno_list[[3]])
+            corrected<-batch_correct(completed,all_pheno,plotdir,label1)
+            if (rank==optimal_rank && lambda==optimal_lambda){
+              outfilename=paste('imputed/corrected_',chrom,'.rds',sep='')
+              saveRDS(corrected,file=outfilename)
+            }
+            for (i in 1:length(pheno_listnames)){
+              for (j in 1:length(cpg_listnames)){
+                print(paste('pheno',pheno_listnames[i],'cpglist',cpg_listnames[j],sep=' '))
+                myDMP<-dmp_subset(corrected,pheno_list[[i]], cpg_lists[[j]])
+                subset_name<-paste(pheno_listnames[i],cpg_listnames[j],sep='_')
+                gg_qqplot(myDMP[[1]]$P.Value,plotdir=plotdir,label=subset_name)
+              }
             }
           }
         }
@@ -535,12 +559,21 @@ for (chrom in chroms){
   }
 }
 
+pipeline<-function(){
+  pheno_list<-get_pheno_data()
+  compute_r_squared()
+  impute()
+}
+
+pipeline()
+
+
 ```
 
 # Running on Hoffman cluster
 To run on Hoffman, save the script above as cpg_impute.r.  Then, generate a task list file:
 
-```{r}
+```{r eval=FALSE}
 setwd('../rawdata/impute_cpg/')
 
 chroms<-as.character(seq(1:22))

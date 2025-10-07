@@ -1,13 +1,21 @@
 ---
 title: "Pipeline to create analysis ready methylation data from PPMI idat files"
-output: html_notebook
+output:
+  pdf_document: default
+  html_notebook: default
 ---
 
-Under **../rawdata**:
+```{r, setup, include=FALSE}
+# We assume we're in the notebooks directory
+basedir<-paste(getwd(),'/../rawdata/PPMI_EPIC',sep='')
+knitr::opts_knit$set(root.dir = basedir)
+```
 
-Download the idat files from [PPMI repository](https://www.ppmi-info.org/access-data-specimens/download-data) and save to a folder called **PPMI_EPIC/idats**
+Under **../rawdata**, , save the following files into **PPMI/** directory::
 
-Download and save in **PPMI_EPIC/** the linkage file **ppmi_140_link_list_20210607.csv** and the covariate file **Participant_Status_16Jul2025.csv** from the [PPMI Box folder](https://app.box.com/folder/344303646736)
+- idat files from [PPMI repository](https://www.ppmi-info.org/access-data-specimens/download-data)
+
+- the linkage file **ppmi_140_link_list_20210607.csv** and the covariate file **Participant_Status_16Jul2025.csv** from the [PPMI Box folder](https://app.box.com/folder/344303646736)
 
 The first step is to generate the sample sheets within each of the idat folders.  Be sure you have installed pandas in your Python environment. Run the following Python code:
 
@@ -17,7 +25,7 @@ import glob
 import pandas as pd
 import os
 
-os.chdir('../rawdata/PPMI_EPIC')
+
 
 df_link = pd.read_csv('ppmi_140_link_list_20210607.csv')
 df_link['PATNO'] = df_link['PATNO'].astype('str')
@@ -53,7 +61,7 @@ Next we now will undertake a time-consuming step but memory efficient step of ge
 
 ```{r eval=FALSE}
 library(ChAMP)
-setwd('../rawdata/PPMI_EPIC/')
+
 dirs <- list.dirs(path='idats')
 for (dir in dirs){
   print(dir)
@@ -104,9 +112,6 @@ Next we want to concatenate the results by running this Python script:
 import pandas as pd
 import glob
 import os
-
-os.chdir('../rawdata/PPMI_EPIC')
-
 
 matrices=['beta','M','pd','intensity','detP','beadcount','Meth','UnMeth']
 samplesheets = ['pd']
