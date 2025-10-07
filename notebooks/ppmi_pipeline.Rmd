@@ -15,13 +15,14 @@ The first step is to generate the sample sheets within each of the idat folders.
 import sys
 import glob
 import pandas as pd
+import os
 
-basedir='../rawdata/PPMI_EPIC/'
+os.chdir('../rawdata/PPMI_EPIC')
 
-df_link = pd.read_csv(basedir+'ppmi_140_link_list_20210607.csv')
+df_link = pd.read_csv('ppmi_140_link_list_20210607.csv')
 df_link['PATNO'] = df_link['PATNO'].astype('str')
 
-df_cov = pd.read_csv(basedir+'Participant_Status_16Jul2025.csv')
+df_cov = pd.read_csv('Participant_Status_16Jul2025.csv')
 df_cov['PATNO'] = df_cov['PATNO'].astype('str')
 
 df_sample_pheno = pd.merge(df_cov,df_link,on='PATNO')[['PATNO','SENTRIXID','POSITION','COHORT_DEFINITION','EVENT_ID']]
@@ -29,7 +30,7 @@ phenos = ["Parkinson's Disease","Healthy Control"]
 df_sample_pheno['SENTRIXID'] = df_sample_pheno['SENTRIXID'].astype(str)
 df_sample_pheno['SAMPLE_GROUP'] = df_sample_pheno['COHORT_DEFINITION']+'_'+df_sample_pheno['EVENT_ID']
 print(df_sample_pheno)
-idat_files = glob.glob(basedir+"idats/*")
+idat_files = glob.glob("idats/*")
 
 list_sentrix = []
 list_pos = []
@@ -43,7 +44,7 @@ for direc in idat_files:
     if len(df_sample_pheno2) > 0:
         df_sample_pheno2 = df_sample_pheno2.rename(columns={'PATNO':'Sample_Name','SENTRIXID':'Sentrix_ID','POSITION':'Sentrix_Position','SAMPLE_GROUP':'Sample_Group'})
         df_sample_pheno2 = df_sample_pheno2.drop(['COHORT_DEFINITION','EVENT_ID'],axis=1)
-        df_sample_pheno2.to_csv(basedir+direc+'/sample_sheet.csv',index=False)
+        df_sample_pheno2.to_csv(direc+'/sample_sheet.csv',index=False)
 
 
 ```
@@ -99,9 +100,14 @@ for (dir in dirs){
 
 Next we want to concatenate the results by running this Python script:
 ```{python eval=FALSE}
-basedir='../rawdata/PPMI_EPIC/'
+
 import pandas as pd
 import glob
+import os
+
+os.chdir('../rawdata/PPMI_EPIC')
+
+
 matrices=['beta','M','pd','intensity','detP','beadcount','Meth','UnMeth']
 samplesheets = ['pd']
 
@@ -166,13 +172,13 @@ def process_datasets(datasets,orientation):
         vals_filelist=[]
         for index,sentrix in enumerate(sentrixlist):
             if index==0:                
-                    rows_file=basedir+sentrix+'/'+matrix+'_row.txt'
+                    rows_file=sentrix+'/'+matrix+'_row.txt'
             #print(f"sentrix {index} {sentrix}")            
-            cols_file=basedir+sentrix+'/'+matrix+'_cols.txt'
+            cols_file=sentrix+'/'+matrix+'_cols.txt'
             cols_filelist.append(cols_file)
-            vals_file=basedir+sentrix+'/'+matrix+'_vals.txt'
+            vals_file=sentrix+'/'+matrix+'_vals.txt'
             vals_filelist.append(vals_file)
-        outfilename=basedir+matrix+'.txt'
+        outfilename=matrix+'.txt'
         print(f"Output to {outfilename}")
         #print(f"{cols_file} {rows_file} {outfilename} {vals_filelist} ")
         if orientation == 'vertical':
