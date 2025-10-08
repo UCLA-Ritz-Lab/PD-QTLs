@@ -433,32 +433,45 @@ batch_correct<-function(df_data,df_pheno,plotdir,label){
   return(as.data.frame(corrected))
 }
 
-filter_cpgs<-function(myImport,arraytype,pheno_list){
-  myFiltered<-champ.filter(beta=myImport$beta,SampleCutoff = 1.0,arraytype=arraytype,fixOutlier = FALSE)
-    # assign sample names to columns
+filter_cpgs<-function(df,arraytype,pheno_list){
+  myFiltered<-champ.filter(beta=df,pd=NULL,SampleCutoff = 1.0,arraytype=arraytype,fixOutlier = FALSE)
+  # assign sample names to columns
   newdf<-as.data.frame(myFiltered$beta)
   colnames(newdf)<-c(pheno_list[[1]]$Sample_Name,pheno_list[[3]]$Sample_Name)
   return(newdf)
 }
 
-blank_row<-function(val){
+blank_val<-function(val){
   if(!is.na(val) && runif(1)>.5) {
     val = NA
   }
   return(val)
 }
 
-add_blanks<-function(df){
+blank_row<-function(row){
+  if(runif(1)>.5) {
+    row = rep(NA,length(row))
+  }
+  return(row)
+}
+
+add_blanks<-function(df,missingtype){
   ppmi_subset<-df[,ppmi_indices]
-  ppmi_defined<-!is.na(apply(ppmi_subset,1,sum))
-  peg_subset_to_blank<-df[ppmi_defined,c(peg1_indices,peg2_indices)]
-  peg_subset_no_blank<-df[!ppmi_defined,c(peg1_indices,peg2_indices)]
-  blanked<-apply(peg_subset_to_blank,c(1,2),blank_row)
-  peg_subset<-rbind(blanked,peg_subset_no_blank)
-  peg_subset<-peg_subset[rownames(ppmi_subset),]
+  #ppmi_defined<-!is.na(apply(ppmi_subset,1,sum))
+  peg_subset_to_blank<-df[,c(peg1_indices,peg2_indices)]
+  #peg_subset_no_blank<-df[!ppmi_defined,c(peg1_indices,peg2_indices)]
+  if(missingtype=='mcar'){
+    blanked<-apply(peg_subset_to_blank,c(1,2),blank_val)
+  }else if(missingtype=='mar'){
+    blanked<-t(apply(peg_subset_to_blank,c(1),blank_row))
+    colnames(blanked)<-colnames(peg_subset_to_blank)
+  }
+  #peg_subset<-rbind(blanked,peg_subset_no_blank)
+  peg_subset<-blanked[rownames(ppmi_subset),]
   newdf<-cbind(ppmi_subset,peg_subset)
   return(newdf)
 }
+
 
 
 get_deltas<-function(is_imputed,truth,imputed){
@@ -469,40 +482,44 @@ get_deltas<-function(is_imputed,truth,imputed){
   return(delta)
 }
 
+compute_r_squared2<-function(truth,blanked,is_blanked,rank,lambda){
+  completed<-svd_impute(blanked,rank,lambda)
+  delta_matrix<-is_blanked * (truth - completed) *(truth - completed)
+  total_blanked<-sum(is_blanked)
+  sse<-sum(delta_matrix)
+  mean<-sum(is_blanked * truth)/total_blanked
+  sst<-sum(is_blanked * (truth-mean)*(truth-mean))
+  rsquared<- 1-(sse/sst)
+  return(rsquared)
+            
+}
+
 compute_r_squared<-function(){
+  pheno_list<-get_pheno_data()
   for (chrom in chroms){
     if (is_local || chrom==selected_chr){
-      myImport<-list('beta')
       print(paste("Chromosome",chrom,sep=' '))
       infilename<-paste('chunks/merged_',chrom,'.rds',sep='')
       # load from file
       raw<-readRDS(infilename)
       df_450k<-get_450k(chrom)
-      myImport$beta<-raw[df_450k$`450k_ID`,]
-      merged_450k<-filter_cpgs(myImport,'450K',pheno_list)
+      merged_450k<-filter_cpgs(raw[df_450k$`450k_ID`,],'450K',pheno_list)
       isdefined<-!is.na(apply(merged_450k,1,sum))
       merged_450k<-merged_450k[isdefined,]
-      blanked_450k<-add_blanks(merged_450k)
-      cpgmatrix_is_blanked<-!is.na(merged_450k) & is.na(blanked_450k)
+      mcar_450k<-add_blanks(merged_450k,'mcar')
+      mar_450k<-add_blanks(merged_450k,'mar')
+      mcar_is_blanked<-!is.na(merged_450k) & is.na(mcar_450k)
+      mar_is_blanked<-!is.na(merged_450k) & is.na(mar_450k)
       for (rank in ranks){
         for (lambda in lambdas){
           if (is_local || (rank==selected_rank && lambda==selected_lambda)){
             label1<-paste('chrom',chrom,'rank',rank,'lambda',lambda,'',sep='_')
-            plotdir<-paste('plots',label1,sep='/')
-            if (!dir.exists(plotdir)){ 
-              dir.create(plotdir)
-            }
             print(paste("Label",label1,sep=" "))
-            completed_450k<-svd_impute(blanked_450k,rank,lambda)
-            delta_matrix<-cpgmatrix_is_blanked * (merged_450k - completed_450k) *(merged_450k - completed_450k)
-            total_blanked<-sum(cpgmatrix_is_blanked)
-            sse<-sum(delta_matrix)/total_blanked
-            mean<-sum(cpgmatrix_is_blanked * merged_450k)/total_blanked
-            sst<-sum(cpgmatrix_is_blanked * (merged_450k-mean)*(merged_450k-mean))
-            rsquared<- 1-(sse/sst)
-            label1<-paste(label1,rsquared,sep=':')
+            mcar_rsq<-compute_r_squared2(merged_450k,mcar_450k,mcar_is_blanked,rank,lambda)
+            mar_rsq<-compute_r_squared2(merged_450k,mar_450k,mar_is_blanked,rank,lambda)
             cat('\n')
-            cat(label1)
+            cat(paste('mcar_rsquared',mcar_rsq,sep=':'))
+            cat(paste('mar_rsquared',mar_rsq,sep=':'))
             cat('\n')
           }
         }
@@ -512,17 +529,16 @@ compute_r_squared<-function(){
 }
 
 impute<-function(){
+  pheno_list<-get_pheno_data()
   for (chrom in chroms){
     if (is_local || chrom==selected_chr){
-      myImport<-list('beta')
       print(paste("Chromosome",chrom,sep=' '))
       infilename<-paste('chunks/merged_',chrom,'.rds',sep='')
       # load from file
       raw<-readRDS(infilename)
       df_epic_450k<-get_epic_450k(chrom)
-      myImport$beta<-raw[df_epic_450k$epic_ID,]
       # filter out nonCPGs using CHAMP
-      merged_all<-filter_cpgs(myImport,'EPIC',pheno_list)
+      merged_all<-filter_cpgs(raw[df_epic_450k$epic_ID,],'EPIC',pheno_list)
       #cpgmatrix_is_blanked_peg<-cpgmatrix_is_blanked[,c(peg1_indices,peg2_indices)]
       # get the join of epic and 450k
       cpg_lists<-get_cpg_lists(df_epic_450k,merged_all)
@@ -560,9 +576,8 @@ impute<-function(){
 }
 
 pipeline<-function(){
-  pheno_list<-get_pheno_data()
   compute_r_squared()
-  impute()
+  #impute()
 }
 
 pipeline()
@@ -574,8 +589,6 @@ pipeline()
 To run on Hoffman, save the script above as cpg_impute.r.  Then, generate a task list file:
 
 ```{r eval=FALSE}
-setwd('../rawdata/impute_cpg/')
-
 chroms<-as.character(seq(1:22))
 lambdas<-c(50,40,30,20)
 ranks=c(15,10,5)
@@ -595,7 +608,6 @@ for(chrom in chroms){
 }
 task_df<-t(do.call(data.frame,tasklist))
 colnames(task_df)<-c('task_id','chrom','rank','lambda')
-#colnames(task_df)<-c('task_id','rank','lambda')
 write.table(task_df,file='tasks.txt',quote=F,row.names=F)
 
 ```
@@ -657,4 +669,54 @@ qsub array.sh
 
 ```
 
+collect the output from Hoffman when job completes:
+```{bash eval=FALSE}
+cat joblog.* > all_results.txt
+```
 
+Transfer to impute_cpg direcory. Run this parser to process the raw data into a table:
+
+```{python eval=FALSE}
+import re
+import sys
+
+chrom=''
+rank=0
+lmbda=0
+pattern = re.compile('mcar_rsquared:([\\d\\.]+)mar_rsquared:([\\d\\.]+)')
+
+with open('rsquared.tsv','w') as outfile:
+	outfile.write(f'chrom\trank\tlambda\tmcar\tmar\n')
+	with open('all_results.txt','r') as infile:
+		for line in infile:
+			line = line.strip()
+			if 'Label chrom' in line:
+				val = line.split(' ')[2]
+				_,chrom,_,rank,_,lmbda,_ = val.split('_')
+				#print(f'chrom {chrom} rank {rank} lambda {lmbda}')
+				
+			if 'mcar_rsquared' in line and 'cat' not in line:
+				m= pattern.match(line)
+				if m != None:
+					mcar = m.group(1)
+					mar = m.group(2)
+					#print(m.group(1)+m.group(2))
+					outlist = [chrom,rank,lmbda,mcar,mar]
+					outfile.write('\t'.join(outlist)+'\n')
+				
+			
+```
+
+Read in the rsquared results:
+
+```{r eval=TRUE}
+rsquared<-read.table('rsquared.tsv',header=T)
+mcar_means<-tapply(rsquared$mcar,list(rsquared$lambda,rsquared$rank),mean)
+mar_means<-tapply(rsquared$mar,list(rsquared$lambda,rsquared$rank),mean)
+print("MAR rsquared values averaged across chromosomes")
+mar_means
+print("MCAR rsquared values averaged across chromosomes")
+mcar_means
+```
+
+Results indicate that the R-squared values remain reasonably high for different missingness patterns and different hyperparameters of the matrix completion method.
