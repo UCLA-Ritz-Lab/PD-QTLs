@@ -1,0 +1,69 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# PPMI WGS VCF → Merged VCF → PLINK2 Pipeline Configuration
+# Reference genome: GRCh37 / hg19 (chromosomes named 1, 2, ... 22)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Directory containing per-sample VCF files
+# File naming: PPMISI{SAMPLE_ID}.realigned.recalibrated.g.genotyped.filtered.annotated.vcf.gz
+vcf_dir: "Downloads"
+
+# Output directory
+out_dir: "results"
+
+# Reference genome FASTA (GRCh37 / hg19)
+# Download if needed:
+#   wget ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/technical/reference/human_g1k_v37.fasta.gz
+#   bgzip -d human_g1k_v37.fasta.gz
+#   mv human_g1k_v37.fasta resources/hg19.fa
+#   samtools faidx resources/hg19.fa
+ref_fasta: "resources/hg19.fa"
+
+# Chromosomes to include — GRCh37 style (no 'chr' prefix)
+chromosomes:
+  - "1"
+  - "2"
+  - "3"
+  - "4"
+  - "5"
+  - "6"
+  - "7"
+  - "8"
+  - "9"
+  - "10"
+  - "11"
+  - "12"
+  - "13"
+  - "14"
+  - "15"
+  - "16"
+  - "17"
+  - "18"
+  - "19"
+  - "20"
+  - "21"
+  - "22"
+  # Uncomment if needed:
+  # - "X"
+
+# ── VCF QC filters applied during per-sample normalisation ───────────────────
+# These match GATK best-practice thresholds for WGS
+filters:
+  min_gq: 20          # minimum genotype quality
+  min_dp: 10          # minimum read depth per sample
+  max_missing: 0.05   # maximum fraction of missing genotypes per variant (5%)
+
+# ── PLINK2 QC filters ─────────────────────────────────────────────────────────
+plink:
+  maf: 0.01           # minor allele frequency threshold
+  geno: 0.05          # maximum per-variant missingness
+  mind: 0.10          # maximum per-sample missingness
+  hwe: 1e-6           # Hardy-Weinberg equilibrium p-value threshold
+  min_ac: 2           # minimum allele count (additional rare variant filter)
+
+# ── Compute resources ─────────────────────────────────────────────────────────
+# Adjust to your workstation's actual core/memory counts
+resources:
+  threads_bcftools: 4
+  threads_merge: 8
+  threads_plink: 8
+  mem_gb_merge: 32     # memory for merge step — increase for 500+ samples
