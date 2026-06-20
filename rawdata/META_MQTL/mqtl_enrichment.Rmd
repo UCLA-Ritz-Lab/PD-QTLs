@@ -1,0 +1,700 @@
+---
+title: "mQTL Enrichment Analysis: GO, KEGG & Reactome"
+author: "Your Name"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  cache   = TRUE,
+  fig.width  = 10,
+  fig.height = 7
+)
+```
+
+```{r libraries}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(data.table)
+  library(missMethyl)       # methylation-aware GO/KEGG enrichment
+  library(ReactomePA)       # Reactome pathway enrichment
+  library(org.Hs.eg.db)    # human gene annotation
+  library(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)  # EPIC v1 annotation
+  library(ggplot2)
+  library(patchwork)
+  library(scales)
+})
+
+# Explicitly prefer dplyr functions that are commonly masked
+# by Bioconductor packages (matrixStats, AnnotationDbi etc.)
+count    <- dplyr::count
+select   <- dplyr::select
+filter   <- dplyr::filter
+rename   <- dplyr::rename
+mutate   <- dplyr::mutate
+```
+
+---
+
+# 1. Configuration
+
+```{r config}
+# ── Input files from meta-analysis pipeline ───────────────────────────────────
+SIG_FILES <- list(
+  cases    = "results/meta/cases_sig_fdr05.csv",
+  controls = "results/meta/controls_sig_fdr05.csv"
+)
+
+# Full meta-analysis results (for background probe list)
+META_FILES <- list(
+  cases    = "results/meta/cases_meta_results.csv.gz",
+  controls = "results/meta/controls_meta_results.csv.gz"
+)
+
+# Output directory
+OUT_DIR <- "results/enrichment"
+dir.create(OUT_DIR, recursive=TRUE, showWarnings=FALSE)
+
+# FDR threshold for enrichment results
+ENRICH_FDR <- 0.05
+
+# Minimum gene set size (avoid very small/large gene sets)
+MIN_GS_SIZE <- 10
+MAX_GS_SIZE <- 500
+
+# Colors
+GROUP_COLORS <- c(cases="#E41A1C", controls="#377EB8")
+```
+
+---
+
+# 2. Load Significant CpGs
+
+```{r load-sig-cpgs}
+# Load significant mQTL results per group
+sig_list <- imap(SIG_FILES, function(path, group) {
+  if (!file.exists(path)) {
+    warning(sprintf("File not found: %s", path))
+    return(NULL)
+  }
+  dat <- fread(path, data.table=FALSE)
+  cat(sprintf("%-10s: %s significant pairs (FDR<0.05)\n",
+      group, format(nrow(dat), big.mark=",")))
+  dat
+})
+sig_list <- Filter(Negate(is.null), sig_list)
+
+# Load full results for background CpG universe
+meta_list <- imap(META_FILES, function(path, group) {
+  if (!file.exists(path)) {
+    warning(sprintf("Full results not found: %s", path))
+    return(NULL)
+  }
+  dat <- fread(path, data.table=FALSE)
+  cat(sprintf("%-10s: %s total tested pairs (background)\n",
+      group, format(nrow(dat), big.mark=",")))
+  dat
+})
+meta_list <- Filter(Negate(is.null), meta_list)
+```
+
+## 2.1 Extract Unique Significant CpGs
+
+```{r extract-cpgs}
+# For enrichment we work at the CpG level, not the SNP-CpG pair level.
+# A CpG may appear multiple times (associated with different SNPs) —
+# we deduplicate to get the unique set of CpGs under genetic regulation.
+
+sig_cpgs <- imap(sig_list, function(dat, group) {
+  cpgs <- unique(dat$cpg_id)
+  cat(sprintf("%-10s: %s unique significant CpGs\n",
+      group, format(length(cpgs), big.mark=",")))
+  cpgs
+})
+
+# Background: all CpGs tested in the meta-analysis
+bg_cpgs <- imap(meta_list, function(dat, group) {
+  cpgs <- unique(dat$cpg_id)
+  cat(sprintf("%-10s: %s background CpGs\n",
+      group, format(length(cpgs), big.mark=",")))
+  cpgs
+})
+
+# Summary
+cat(sprintf("\nCases:    %s sig / %s background (%.1f%%)\n",
+    format(length(sig_cpgs$cases),    big.mark=","),
+    format(length(bg_cpgs$cases),     big.mark=","),
+    100 * length(sig_cpgs$cases) / length(bg_cpgs$cases)))
+cat(sprintf("Controls: %s sig / %s background (%.1f%%)\n",
+    format(length(sig_cpgs$controls), big.mark=","),
+    format(length(bg_cpgs$controls),  big.mark=","),
+    100 * length(sig_cpgs$controls) / length(bg_cpgs$controls)))
+```
+
+---
+
+# 3. EPIC v1 Annotation
+
+```{r epic-annotation}
+# Load EPIC v1 annotation — maps CpG IDs to genes and genomic features
+anno <- as.data.frame(
+  getAnnotation(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+)
+
+cat(sprintf("EPIC v1 annotation: %d probes\n", nrow(anno)))
+cat(sprintf("Annotation columns: %s\n",
+    paste(colnames(anno)[1:10], collapse=", ")))
+
+# Genomic feature distribution of significant CpGs
+feature_dist <- imap_dfr(sig_cpgs, function(cpgs, group) {
+  anno %>%
+    filter(Name %in% cpgs) %>%
+    dplyr::count(Relation_to_Island, UCSC_RefGene_Group) %>%
+    mutate(group=group)
+})
+
+# CpG island relation distribution
+imap_dfr(sig_cpgs, function(cpgs, group) {
+  anno %>%
+    filter(Name %in% cpgs) %>%
+    dplyr::count(Relation_to_Island) %>%
+    mutate(group=str_to_title(group),
+           pct=round(100*n/sum(n), 1))
+}) %>%
+  pivot_wider(names_from=group, values_from=c(n, pct)) %>%
+  knitr::kable(caption="CpG island relation of significant mQTL CpGs")
+```
+
+```{r genomic-feature-plot, fig.height=4}
+imap_dfr(sig_cpgs, function(cpgs, group) {
+  anno %>%
+    filter(Name %in% cpgs) %>%
+    mutate(
+      feature = case_when(
+        grepl("TSS",  UCSC_RefGene_Group) ~ "Promoter (TSS)",
+        grepl("Body", UCSC_RefGene_Group) ~ "Gene Body",
+        grepl("ExonBnd|3'UTR|5'UTR", UCSC_RefGene_Group) ~ "UTR/Exon",
+        UCSC_RefGene_Group == "" ~ "Intergenic",
+        TRUE ~ "Other"
+      )
+    ) %>%
+    dplyr::count(feature) %>%
+    mutate(group=str_to_title(group), pct=100*n/sum(n))
+}) %>%
+  ggplot(aes(x=reorder(feature, pct), y=pct, fill=group)) +
+  geom_col(position="dodge", width=0.7) +
+  scale_fill_manual(values=GROUP_COLORS) +
+  coord_flip() +
+  labs(title="Genomic Feature Distribution of Significant mQTL CpGs",
+       x=NULL, y="Percentage (%)", fill=NULL) +
+  theme_minimal(base_size=12) +
+  theme(legend.position="bottom")
+```
+
+---
+
+# 4. GO Enrichment (missMethyl — gometh)
+
+`gometh()` tests GO term enrichment while correcting for the number of
+CpG probes per gene — genes with more probes are more likely to appear
+by chance in any CpG list, and this bias must be corrected.
+
+```{r go-enrichment, cache=TRUE}
+run_gometh <- function(sig_cpgs, bg_cpgs, collection="GO", group_name="") {
+  cat(sprintf("\nRunning gometh (%s) for %s...\n", collection, group_name))
+
+  result <- tryCatch(
+    gometh(
+      sig.cpg   = sig_cpgs,
+      all.cpg   = bg_cpgs,
+      collection = collection,
+      array.type = "EPIC",
+      prior.prob = TRUE   # use probe-count correction
+    ),
+    error = function(e) {
+      cat(sprintf("  ERROR: %s\n", e$message))
+      NULL
+    }
+  )
+
+  if (is.null(result)) return(NULL)
+
+  result <- result %>%
+    filter(N >= MIN_GS_SIZE, N <= MAX_GS_SIZE) %>%
+    arrange(FDR) %>%
+    mutate(group=group_name)
+
+  n_sig <- sum(result$FDR < ENRICH_FDR, na.rm=TRUE)
+  cat(sprintf("  Significant terms (FDR<%s): %d\n", ENRICH_FDR, n_sig))
+  result
+}
+
+# Run GO enrichment for both groups
+go_results <- list()
+for (group in names(sig_cpgs)) {
+  go_results[[group]] <- run_gometh(
+    sig_cpgs = sig_cpgs[[group]],
+    bg_cpgs  = bg_cpgs[[group]],
+    collection = "GO",
+    group_name = group
+  )
+}
+```
+
+## 4.1 Top GO Terms
+
+```{r go-top-terms}
+for (group in names(go_results)) {
+  res <- go_results[[group]]
+  if (is.null(res)) next
+
+  sig <- res %>% filter(FDR < ENRICH_FDR)
+  cat(sprintf("\n### %s — %d significant GO terms\n",
+      str_to_title(group), nrow(sig)))
+
+  if (nrow(sig) == 0) {
+    cat("No significant GO terms at FDR <", ENRICH_FDR, "\n")
+    next
+  }
+
+  sig %>%
+    slice_head(n=20) %>%
+    select(ONTOLOGY, TERM, N, DE, P.DE, FDR) %>%
+    mutate(
+      P.DE = formatC(P.DE, format="e", digits=2),
+      FDR  = formatC(FDR,  format="e", digits=2)
+    ) %>%
+    knitr::kable(
+      col.names = c("Ontology", "Term", "N genes",
+                    "N DE", "p-value", "FDR"),
+      caption = sprintf("Top GO terms — %s", str_to_title(group))
+    ) %>%
+    print()
+}
+```
+
+## 4.2 GO Bubble Plots
+
+```{r go-bubble, fig.height=8}
+plot_go_bubble <- function(res, group, n_top=20, title_suffix="",
+                           label="Terms") {
+  if (is.null(res)) return(NULL)
+
+  # Normalise column names — GO uses TERM/ONTOLOGY/N/DE/FDR
+  # KEGG uses TERM/N/DE/FDR (no ONTOLOGY column)
+  # Rename to common names for plotting
+  if ("TERM" %in% colnames(res) && !"term_label" %in% colnames(res)) {
+    res <- res %>% dplyr::rename(term_label=TERM)
+  } else if ("Description" %in% colnames(res)) {
+    res <- res %>% dplyr::rename(term_label=Description)
+  } else {
+    warning("Cannot find term label column in enrichment results")
+    return(NULL)
+  }
+
+  # Size column: DE for gometh, Count for ReactomePA
+  size_col <- if ("DE" %in% colnames(res)) "DE" else "Count"
+
+  # Color column: ONTOLOGY for GO, absent for KEGG/Reactome
+  has_ontology <- "ONTOLOGY" %in% colnames(res)
+
+  plot_dat <- res %>%
+    filter(FDR < ENRICH_FDR) %>%
+    slice_head(n=n_top) %>%
+    dplyr::mutate(
+      neg_log10_fdr = -log10(FDR),
+      term_label    = str_trunc(term_label, 50),
+      term_label    = reorder(term_label, neg_log10_fdr)
+    )
+
+  if (nrow(plot_dat) == 0) {
+    return(ggplot() +
+      annotate("text", x=0.5, y=0.5,
+               label=sprintf("No significant %s", label)) +
+      theme_void())
+  }
+
+  p <- ggplot(plot_dat,
+         aes(x=neg_log10_fdr, y=term_label,
+             size=.data[[size_col]])) +
+    geom_vline(xintercept=-log10(ENRICH_FDR),
+               linetype="dashed", color="grey50") +
+    scale_size_continuous(name="Genes hit", range=c(3,10)) +
+    labs(
+      title = sprintf("%s%s — Top %s",
+                      str_to_title(group), title_suffix, label),
+      x = "-log₁₀(FDR)",
+      y = NULL
+    ) +
+    theme_minimal(base_size=11) +
+    theme(legend.position="right",
+          axis.text.y=element_text(size=9))
+
+  if (has_ontology) {
+    p <- p +
+      geom_point(aes(color=ONTOLOGY), alpha=0.8) +
+      scale_color_brewer(palette="Set1", name="Ontology")
+  } else {
+    p <- p +
+      geom_point(color="steelblue", alpha=0.8)
+  }
+  p
+}
+
+go_plots <- imap(go_results, plot_go_bubble)
+go_plots <- Filter(Negate(is.null), go_plots)
+
+if (length(go_plots) > 0)
+  wrap_plots(go_plots, ncol=1) +
+    plot_annotation(
+      title = "GO Enrichment — Significant mQTL CpGs",
+      theme = theme(plot.title=element_text(size=14, face="bold"))
+    )
+```
+
+## 4.3 Cases vs Controls GO Comparison
+
+```{r go-comparison}
+# Find GO terms significant in both, cases only, or controls only
+if (!is.null(go_results$cases) && !is.null(go_results$controls)) {
+
+  cases_sig <- go_results$cases    %>%
+    filter(FDR < ENRICH_FDR) %>% pull(TERM)
+  ctrls_sig <- go_results$controls %>%
+    filter(FDR < ENRICH_FDR) %>% pull(TERM)
+
+  cat(sprintf("GO terms significant in cases only:    %d\n",
+      length(setdiff(cases_sig, ctrls_sig))))
+  cat(sprintf("GO terms significant in controls only: %d\n",
+      length(setdiff(ctrls_sig, cases_sig))))
+  cat(sprintf("GO terms significant in both:          %d\n",
+      length(intersect(cases_sig, ctrls_sig))))
+
+  if (length(intersect(cases_sig, ctrls_sig)) > 0) {
+    cat("\nShared significant GO terms:\n")
+    print(intersect(cases_sig, ctrls_sig))
+  }
+}
+```
+
+---
+
+# 5. KEGG Enrichment (missMethyl)
+
+```{r kegg-enrichment, cache=TRUE}
+kegg_results <- list()
+for (group in names(sig_cpgs)) {
+  kegg_results[[group]] <- run_gometh(
+    sig_cpgs   = sig_cpgs[[group]],
+    bg_cpgs    = bg_cpgs[[group]],
+    collection = "KEGG",
+    group_name = group
+  )
+}
+```
+
+```{r kegg-top}
+for (group in names(kegg_results)) {
+  res <- kegg_results[[group]]
+  if (is.null(res)) next
+
+  sig <- res %>% filter(FDR < ENRICH_FDR)
+  cat(sprintf("\n### %s — %d significant KEGG pathways\n",
+      str_to_title(group), nrow(sig)))
+
+  if (nrow(sig) == 0) {
+    cat("No significant KEGG pathways at FDR <", ENRICH_FDR, "\n")
+    next
+  }
+
+  sig %>%
+    slice_head(n=20) %>%
+    select(TERM, N, DE, P.DE, FDR) %>%
+    mutate(
+      P.DE = formatC(P.DE, format="e", digits=2),
+      FDR  = formatC(FDR,  format="e", digits=2)
+    ) %>%
+    knitr::kable(
+      col.names = c("Pathway", "N genes", "N DE", "p-value", "FDR"),
+      caption   = sprintf("Top KEGG pathways — %s", str_to_title(group))
+    ) %>%
+    print()
+}
+```
+
+```{r kegg-plot, fig.height=7}
+kegg_plots <- imap(kegg_results, ~plot_go_bubble(.x, .y, n_top=20, label="KEGG Pathways"))
+kegg_plots <- Filter(Negate(is.null), kegg_plots)
+
+if (length(kegg_plots) > 0)
+  wrap_plots(kegg_plots, ncol=1) +
+    plot_annotation(
+      title = "KEGG Enrichment — Significant mQTL CpGs",
+      theme = theme(plot.title=element_text(size=14, face="bold"))
+    )
+```
+
+---
+
+# 6. Reactome Enrichment
+
+Reactome enrichment uses Entrez gene IDs. We map CpGs to genes via
+the EPIC annotation then run `enrichPathway()` from ReactomePA.
+
+```{r cpg-to-entrez}
+# Map CpGs to Entrez IDs via EPIC annotation
+cpg_to_entrez <- function(cpg_ids) {
+  anno %>%
+    filter(Name %in% cpg_ids) %>%
+    select(Name, UCSC_RefGene_Name) %>%
+    separate_rows(UCSC_RefGene_Name, sep=";") %>%
+    filter(UCSC_RefGene_Name != "") %>%
+    distinct(UCSC_RefGene_Name) %>%
+    pull(UCSC_RefGene_Name) %>%
+    { suppressMessages(
+        AnnotationDbi::select(
+          org.Hs.eg.db,
+          keys    = .,
+          columns = "ENTREZID",
+          keytype = "SYMBOL"
+        )
+      ) } %>%
+    filter(!is.na(ENTREZID)) %>%
+    pull(ENTREZID) %>%
+    unique()
+}
+
+# Map significant and background CpGs to Entrez IDs
+cat("Mapping CpGs to Entrez gene IDs...\n")
+
+sig_entrez <- imap(sig_cpgs, function(cpgs, group) {
+  ids <- cpg_to_entrez(cpgs)
+  cat(sprintf("  %-10s sig:  %d CpGs -> %d genes\n",
+      group, length(cpgs), length(ids)))
+  ids
+})
+
+bg_entrez <- imap(bg_cpgs, function(cpgs, group) {
+  ids <- cpg_to_entrez(cpgs)
+  cat(sprintf("  %-10s bg:   %d CpGs -> %d genes\n",
+      group, length(cpgs), length(ids)))
+  ids
+})
+```
+
+```{r reactome-enrichment, cache=TRUE}
+run_reactome <- function(sig_ids, bg_ids, group_name) {
+  cat(sprintf("\nRunning Reactome enrichment for %s...\n", group_name))
+
+  if (length(sig_ids) == 0) {
+    cat("  No genes to test\n")
+    return(NULL)
+  }
+
+  result <- tryCatch(
+    enrichPathway(
+      gene          = sig_ids,
+      universe      = bg_ids,
+      organism      = "human",
+      pAdjustMethod = "BH",
+      pvalueCutoff  = 0.05,
+      qvalueCutoff  = ENRICH_FDR,
+      minGSSize     = MIN_GS_SIZE,
+      maxGSSize     = MAX_GS_SIZE,
+      readable      = TRUE   # convert Entrez IDs to gene symbols
+    ),
+    error = function(e) {
+      cat(sprintf("  ERROR: %s\n", e$message))
+      NULL
+    }
+  )
+
+  if (is.null(result) || nrow(as.data.frame(result)) == 0) {
+    cat("  No significant Reactome pathways\n")
+    return(NULL)
+  }
+
+  res_df <- as.data.frame(result) %>%
+    filter(p.adjust < ENRICH_FDR) %>%
+    mutate(group=group_name)
+
+  cat(sprintf("  Significant pathways (FDR<%s): %d\n",
+      ENRICH_FDR, nrow(res_df)))
+  list(result=result, df=res_df)
+}
+
+reactome_results <- list()
+for (group in names(sig_entrez)) {
+  reactome_results[[group]] <- run_reactome(
+    sig_ids    = sig_entrez[[group]],
+    bg_ids     = bg_entrez[[group]],
+    group_name = group
+  )
+}
+```
+
+## 6.1 Top Reactome Pathways
+
+```{r reactome-top}
+for (group in names(reactome_results)) {
+  res <- reactome_results[[group]]
+  if (is.null(res)) next
+
+  cat(sprintf("\n### %s — %d significant Reactome pathways\n",
+      str_to_title(group), nrow(res$df)))
+
+  res$df %>%
+    slice_head(n=20) %>%
+    select(Description, GeneRatio, BgRatio, p.adjust, geneID) %>%
+    mutate(
+      p.adjust = formatC(p.adjust, format="e", digits=2),
+      # Truncate long gene lists
+      geneID   = str_trunc(geneID, 60)
+    ) %>%
+    knitr::kable(
+      col.names = c("Pathway", "Gene Ratio", "BG Ratio",
+                    "FDR", "Genes"),
+      caption   = sprintf("Top Reactome pathways — %s",
+                          str_to_title(group))
+    ) %>%
+    print()
+}
+```
+
+## 6.2 Reactome Dot Plots
+
+```{r reactome-dotplot, fig.height=8}
+reactome_plots <- imap(reactome_results, function(res, group) {
+  if (is.null(res)) return(NULL)
+
+  plot_dat <- res$df %>%
+    slice_head(n=20) %>%
+    mutate(
+      Description   = str_trunc(Description, 50),
+      Description   = reorder(Description, -p.adjust),
+      neg_log10_fdr = -log10(p.adjust),
+      # Parse GeneRatio to numeric
+      gene_ratio_n  = as.numeric(sub("/.*", "", GeneRatio)),
+      gene_ratio_d  = as.numeric(sub(".*/", "", GeneRatio)),
+      gene_ratio    = gene_ratio_n / gene_ratio_d
+    )
+
+  if (nrow(plot_dat) == 0) return(NULL)
+
+  ggplot(plot_dat,
+         aes(x=gene_ratio, y=Description,
+             size=gene_ratio_n, color=neg_log10_fdr)) +
+    geom_point() +
+    scale_color_gradient(low="steelblue", high="firebrick",
+                         name="-log₁₀(FDR)") +
+    scale_size_continuous(name="Genes hit", range=c(3,10)) +
+    labs(
+      title = sprintf("%s — Top Reactome Pathways",
+                      str_to_title(group)),
+      x = "Gene Ratio", y = NULL
+    ) +
+    theme_minimal(base_size=11) +
+    theme(axis.text.y=element_text(size=9))
+})
+reactome_plots <- Filter(Negate(is.null), reactome_plots)
+
+if (length(reactome_plots) > 0)
+  wrap_plots(reactome_plots, ncol=1) +
+    plot_annotation(
+      title = "Reactome Enrichment — Significant mQTL CpGs",
+      theme = theme(plot.title=element_text(size=14, face="bold"))
+    )
+```
+
+## 6.3 Cases vs Controls Reactome Comparison
+
+```{r reactome-comparison}
+if (!is.null(reactome_results$cases) &&
+    !is.null(reactome_results$controls)) {
+
+  cases_paths <- reactome_results$cases$df$Description
+  ctrls_paths <- reactome_results$controls$df$Description
+
+  cat(sprintf("Reactome pathways — cases only:    %d\n",
+      length(setdiff(cases_paths, ctrls_paths))))
+  cat(sprintf("Reactome pathways — controls only: %d\n",
+      length(setdiff(ctrls_paths, cases_paths))))
+  cat(sprintf("Reactome pathways — both:          %d\n",
+      length(intersect(cases_paths, ctrls_paths))))
+
+  # Shared pathways table
+  shared <- intersect(cases_paths, ctrls_paths)
+  if (length(shared) > 0) {
+    bind_rows(
+      reactome_results$cases$df %>%
+        filter(Description %in% shared) %>%
+        select(Description, p.adjust) %>%
+        rename(FDR_cases=p.adjust),
+      reactome_results$controls$df %>%
+        filter(Description %in% shared) %>%
+        select(Description, p.adjust) %>%
+        rename(FDR_controls=p.adjust)
+    ) %>%
+      group_by(Description) %>%
+      summarise(
+        FDR_cases    = first(FDR_cases,    na_rm=TRUE),
+        FDR_controls = first(FDR_controls, na_rm=TRUE)
+      ) %>%
+      mutate(across(starts_with("FDR"),
+                    ~formatC(.x, format="e", digits=2))) %>%
+      knitr::kable(
+        col.names = c("Pathway", "FDR (Cases)", "FDR (Controls)"),
+        caption   = "Reactome pathways significant in both groups"
+      )
+  } else {
+    cat("No pathways significant in both groups.\n")
+  }
+}
+```
+
+---
+
+# 7. Save Results
+
+```{r save-results}
+for (group in names(go_results)) {
+  if (!is.null(go_results[[group]]))
+    write.csv(go_results[[group]] %>% filter(FDR < ENRICH_FDR),
+              file.path(OUT_DIR, paste0(group, "_GO_sig.csv")),
+              row.names=FALSE, quote=FALSE)
+}
+
+for (group in names(kegg_results)) {
+  if (!is.null(kegg_results[[group]]))
+    write.csv(kegg_results[[group]] %>% filter(FDR < ENRICH_FDR),
+              file.path(OUT_DIR, paste0(group, "_KEGG_sig.csv")),
+              row.names=FALSE, quote=FALSE)
+}
+
+for (group in names(reactome_results)) {
+  if (!is.null(reactome_results[[group]]))
+    write.csv(reactome_results[[group]]$df,
+              file.path(OUT_DIR, paste0(group, "_Reactome_sig.csv")),
+              row.names=FALSE, quote=FALSE)
+}
+
+cat("Saved enrichment results to:", OUT_DIR, "\n")
+```
+
+---
+
+# 8. Session Info
+
+```{r session-info}
+sessionInfo()
+```

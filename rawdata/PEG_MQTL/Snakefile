@@ -1,0 +1,246 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# PEG mQTL Pipeline
+# PEG1 + PEG2 methylation + genotypes → stratified mQTLs → meta-analysis
+#
+# Steps:
+#   1. prepare_datasets   — load methylation, match IDs, filter probes
+#   2. extract_positions  — SNP and CpG positions for MatrixEQTL
+#   3. subset_genotypes   — PLINK2 --keep per dataset
+#   4. export_genotypes   — PLINK2 additive dosage export
+#   5. run_mqtl           — MatrixEQTL cis + trans per dataset
+#   6. meta_analysis      — METAL for cases and controls separately
+# ──────────────────────────────────────────────────────────────────────────────
+
+configfile: "config.yaml"
+
+OUT      = config["out_dir"]
+DATASETS = list(config["datasets"].keys())
+# ──────────────────────────────────────────────────────────────────────────────
+rule all:
+    input:
+        # cis mQTL results per dataset — final outputs for this pipeline
+        expand("{out}/mqtl/{dataset}/cis_mqtls.txt",
+               out=OUT, dataset=DATASETS),
+        expand("{out}/mqtl/{dataset}/trans_mqtls.txt",
+               out=OUT, dataset=DATASETS)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 1: Prepare datasets
+# One R script processes all datasets at once (all share the same
+# methylation data load — splitting would reload large RData files 3x)
+# ──────────────────────────────────────────────────────────────────────────────
+rule prepare_datasets:
+    input:
+        meth_peg1        = config["data"]["meth_peg1"],
+        meth_peg2        = config["data"]["meth_peg2"],
+        sentrix_map_peg1 = config["data"]["sentrix_map_peg1"],
+        sentrix_map_peg2 = config["data"]["sentrix_map_peg2"],
+        covar_peg1       = config["data"]["covar_peg1"],
+        covar_peg2       = config["data"]["covar_peg2"],
+        gwas_linkage     = config["data"]["gwas_linkage"],
+        vcf              = config["data"]["vcf"]
+    output:
+        probe_list = f"{OUT}/datasets/retained_probes.txt",
+        # Per-dataset outputs declared as a group
+        meth_files = expand("{out}/datasets/{dataset}/methylation.csv.gz",
+                            out=OUT, dataset=DATASETS),
+        covar_files = expand("{out}/datasets/{dataset}/covariates.csv",
+                             out=OUT, dataset=DATASETS),
+        keep_files  = expand("{out}/datasets/{dataset}/geno_keep.txt",
+                             out=OUT, dataset=DATASETS),
+        id_maps     = expand("{out}/datasets/{dataset}/id_map.csv",
+                             out=OUT, dataset=DATASETS)
+    conda:
+        "envs/r_mqtl.yaml"
+    threads:
+        config["resources"]["threads_r"]
+    log:
+        f"{OUT}/logs/prepare_datasets.log"
+    shell:
+        """
+        Rscript scripts/prepare_datasets.R \
+            --meth_peg1        {input.meth_peg1} \
+            --meth_peg2        {input.meth_peg2} \
+            --sentrix_map_peg1 {input.sentrix_map_peg1} \
+            --sentrix_map_peg2 {input.sentrix_map_peg2} \
+            --covar_peg1       {input.covar_peg1} \
+            --covar_peg2       {input.covar_peg2} \
+            --gwas_linkage     {input.gwas_linkage} \
+            --vcf              {input.vcf} \
+            --out_dir          {OUT} \
+            --min_sd           {config[filters][min_sd]} \
+            --max_na_frac      {config[filters][max_na_fraction]} \
+            --log              {log} \
+        2>> {log}
+        """
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 2: Extract SNP and CpG positions
+# Needs a QC-filtered .pvar from any dataset — use peg1_cases as reference
+# ──────────────────────────────────────────────────────────────────────────────
+rule extract_positions:
+    input:
+        keep_file  = f"{OUT}/datasets/peg1_cases/geno_keep.txt",
+        probe_list = f"{OUT}/datasets/retained_probes.txt",
+        vcf        = config["data"]["vcf"]
+    output:
+        snp_pos = f"{OUT}/positions/snp_positions.csv",
+        cpg_pos = f"{OUT}/positions/cpg_positions.csv",
+        pvar    = f"{OUT}/positions/reference.pvar"
+    conda:
+        "envs/r_mqtl.yaml"
+    threads:
+        config["resources"]["threads_plink"]
+    log:
+        f"{OUT}/logs/extract_positions.log"
+    shell:
+        """
+        set -euo pipefail
+
+        # Generate a reference .pvar from the full VCF with QC filters
+        plink2 \
+            --vcf   {input.vcf} \
+            --keep  {input.keep_file} \
+            --maf   {config[plink][maf]} \
+            --geno  {config[plink][geno]} \
+            --hwe   {config[plink][hwe]} \
+            --max-alleles 2 \
+            --snps-only \
+            --set-missing-var-ids '@:#:$r:$a' \
+            --new-id-max-allele-len 50 missing \
+            --no-psam-pheno \
+            --make-just-pvar \
+            --out   {OUT}/positions/reference \
+            --threads {threads} \
+        2>> {log}
+
+        Rscript scripts/extract_positions.R \
+            --pvar_file   {output.pvar} \
+            --probe_list  {input.probe_list} \
+            --out_snp_pos {output.snp_pos} \
+            --out_cpg_pos {output.cpg_pos} \
+            --log         {log} \
+        2>> {log}
+        """
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 3: Subset genotypes per dataset (PLINK2 --keep)
+# ──────────────────────────────────────────────────────────────────────────────
+rule subset_genotypes:
+    input:
+        vcf       = config["data"]["vcf"],
+        keep_file = f"{OUT}/datasets/{{dataset}}/geno_keep.txt"
+    output:
+        pgen = f"{OUT}/genotypes/{{dataset}}.pgen",
+        psam = f"{OUT}/genotypes/{{dataset}}.psam",
+        pvar = f"{OUT}/genotypes/{{dataset}}.pvar"
+    conda:
+        "envs/tools.yaml"
+    threads:
+        config["resources"]["threads_plink"]
+    params:
+        prefix = f"{OUT}/genotypes/{{dataset}}"
+    log:
+        f"{OUT}/logs/subset_genotypes/{{dataset}}.log"
+    shell:
+        """
+        set -euo pipefail
+
+        plink2 \
+            --vcf  {input.vcf} \
+            --keep {input.keep_file} \
+            --maf  {config[plink][maf]} \
+            --geno {config[plink][geno]} \
+            --mind {config[plink][mind]} \
+            --hwe  {config[plink][hwe]} \
+            --max-alleles 2 \
+            --snps-only \
+            --set-missing-var-ids '@:#:$r:$a' \
+            --new-id-max-allele-len 50 missing \
+            --no-psam-pheno \
+            --make-pgen \
+            --out  {params.prefix} \
+            --threads {threads} \
+        2> {log}
+        """
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 4: Export additive genotype dosage for MatrixEQTL
+# ──────────────────────────────────────────────────────────────────────────────
+rule export_genotypes:
+    input:
+        pgen = f"{OUT}/genotypes/{{dataset}}.pgen",
+        psam = f"{OUT}/genotypes/{{dataset}}.psam",
+        pvar = f"{OUT}/genotypes/{{dataset}}.pvar"
+    output:
+        raw = f"{OUT}/genotypes/{{dataset}}.raw"
+    conda:
+        "envs/tools.yaml"
+    threads:
+        config["resources"]["threads_plink"]
+    params:
+        in_prefix  = f"{OUT}/genotypes/{{dataset}}",
+        out_prefix = f"{OUT}/genotypes/{{dataset}}"
+    log:
+        f"{OUT}/logs/export_genotypes/{{dataset}}.log"
+    shell:
+        """
+        plink2 \
+            --pfile {params.in_prefix} \
+            --export A \
+            --out    {params.out_prefix} \
+            --threads {threads} \
+        2> {log}
+        """
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 5: Run MatrixEQTL per dataset
+# ──────────────────────────────────────────────────────────────────────────────
+rule run_mqtl:
+    input:
+        raw        = f"{OUT}/genotypes/{{dataset}}.raw",
+        meth_file  = f"{OUT}/datasets/{{dataset}}/methylation.csv.gz",
+        covar_file = f"{OUT}/datasets/{{dataset}}/covariates.csv",
+        id_map     = f"{OUT}/datasets/{{dataset}}/id_map.csv",
+        snp_pos    = f"{OUT}/positions/snp_positions.csv",
+        cpg_pos    = f"{OUT}/positions/cpg_positions.csv"
+    output:
+        cis   = f"{OUT}/mqtl/{{dataset}}/cis_mqtls.txt",
+        trans = f"{OUT}/mqtl/{{dataset}}/trans_mqtls.txt"
+    conda:
+        "envs/r_mqtl.yaml"
+    threads:
+        config["resources"]["threads_r"]
+    params:
+        geno_prefix = f"{OUT}/genotypes/{{dataset}}"
+    log:
+        f"{OUT}/logs/mqtl/{{dataset}}.log"
+    shell:
+        """
+        mkdir -p {OUT}/mqtl/{wildcards.dataset}
+
+        Rscript scripts/run_mqtl.R \
+            --dataset     {wildcards.dataset} \
+            --geno_prefix {params.geno_prefix} \
+            --meth_file   {input.meth_file} \
+            --covar_file  {input.covar_file} \
+            --id_map      {input.id_map} \
+            --snp_pos     {input.snp_pos} \
+            --cpg_pos     {input.cpg_pos} \
+            --out_cis     {output.cis} \
+            --out_trans   {output.trans} \
+            --cis_dist    {config[matrixeqtl][cis_dist]} \
+            --pval_cis    {config[matrixeqtl][pval_cis]} \
+            --pval_trans  {config[matrixeqtl][pval_trans]} \
+            --threads     {threads} \
+            --log         {log} \
+        2>> {log}
+        """
+
+
+

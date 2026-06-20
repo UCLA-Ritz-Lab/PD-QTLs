@@ -2,8 +2,8 @@ library(MatrixEQTL)
 
 #analysis_mode='ewas'
 #analysis_mode='kp'
-#analysis_mode='cis_trans_meth'
-analysis_mode<-'cis_trans_metab'
+analysis_mode='cis_trans_meth'
+#analysis_mode<-'cis_trans_metab'
 
 # from https://slowkow.com/notes/ggplot2-qqplot/
 #
@@ -76,7 +76,10 @@ if(analysis_mode=='ewas' || analysis_mode=='cis_trans_metab'){
   ## Run the analysis
   snpspos = read.table(snps_location_file_name, header = TRUE, stringsAsFactors = FALSE);
   genepos = read.table(gene_location_file_name, header = TRUE, stringsAsFactors = FALSE);
-  expression_file_name = paste("methylation_nosnp_probes_t.tsv", sep="");
+  # use this for all CPGs
+  #expression_file_name = paste("methylation_nosnp_probes_t.tsv", sep="");
+  # use this for CPGs that were differentially methylated
+  expression_file_name = paste("methylation_dmp_probes_t.tsv", sep="");
 }
 
 

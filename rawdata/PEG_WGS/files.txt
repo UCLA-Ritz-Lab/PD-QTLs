@@ -1,0 +1,6 @@
+total 237396
+     0 files.txt
+    72 gwas_linkage.csv
+237324 PEG_PD.phased.vcf.gz
+
+Pegid,Study_ID,Sample_ID,Person_ID,GWAS_ID,DUP
