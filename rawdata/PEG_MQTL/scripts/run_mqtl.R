@@ -12,7 +12,7 @@ suppressPackageStartupMessages({
 
 option_list <- list(
   make_option("--dataset",     type="character"),
-  make_option("--geno_prefix", type="character"),
+  make_option("--geno_tsv",    type="character"),
   make_option("--meth_file",   type="character"),
   make_option("--covar_file",  type="character"),
   make_option("--id_map",      type="character"),
@@ -34,18 +34,17 @@ on.exit({ sink(type="message"); close(log_con) })
 
 cat(sprintf("[%s] Running mQTL: %s\n", Sys.time(), opt$dataset))
 
-# ── Load genotype dosage matrix ───────────────────────────────────────────────
-# PLINK2 exported additive dosage (.raw file)
-raw_file <- paste0(opt$geno_prefix, ".raw")
-cat(sprintf("[%s] Loading genotypes from %s...\n", Sys.time(), raw_file))
-geno_raw <- fread(raw_file, data.table=FALSE)
-snp_cols  <- colnames(geno_raw)[-(1:6)]
-geno_mat  <- t(as.matrix(geno_raw[, snp_cols]))
-colnames(geno_mat) <- geno_raw$IID
-# Strip PLINK allele suffix from SNP names (e.g. rs123_A -> rs123)
-rownames(geno_mat) <- sub("_[ACGT]$", "", rownames(geno_mat))
-cat(sprintf("Genotype matrix: %d SNPs x %d samples\n",
-    nrow(geno_mat), ncol(geno_mat)))
+# ── Read genotype sample IDs from header only ────────────────────────────────
+# geno_tsv is SNP-major (rows=SNPs, cols=samples), bgzipped.
+# Only the header is read here for sample alignment; the full matrix is
+# loaded later via SlicedData$LoadFile to avoid holding it all in RAM
+# (the .raw equivalent was 5.2GB and caused a segfault on fread + t()).
+cat(sprintf("[%s] Reading genotype header from %s\n", Sys.time(), opt$geno_tsv))
+geno_header  <- fread(cmd=paste("zcat", opt$geno_tsv, "| head -1"),
+                      header=FALSE, data.table=FALSE)
+geno_samples <- as.character(geno_header[1, -1])  # drop snp_id column
+cat(sprintf("Genotype file: %d samples in header\n", length(geno_samples)))
+rm(geno_header); gc()
 
 # ── Load methylation matrix ───────────────────────────────────────────────────
 cat(sprintf("[%s] Loading methylation...\n", Sys.time()))
@@ -53,33 +52,30 @@ meth_df  <- fread(opt$meth_file, data.table=FALSE)
 probe_ids <- meth_df[[1]]
 meth_mat  <- as.matrix(meth_df[,-1])
 rownames(meth_mat) <- probe_ids
+rm(meth_df); gc()
 cat(sprintf("Methylation: %d probes x %d samples\n",
     nrow(meth_mat), ncol(meth_mat)))
 
 # ── Load ID map and align samples ─────────────────────────────────────────────
-# Methylation columns are Pegid; genotype columns are GWAS_ID
-# Use id_map to align
+# Methylation columns are Pegid; geno_samples are GWAS_IDs from tsv header.
+# Use id_map to align -- geno matrix itself is not loaded into RAM here.
 id_map <- read.csv(opt$id_map, stringsAsFactors=FALSE)
 
-# Find samples present in both
-geno_gwas_ids <- colnames(geno_mat)
-meth_pegids   <- colnames(meth_mat)
+meth_pegids <- colnames(meth_mat)
 
 aligned <- id_map %>%
-  filter(Pegid %in% meth_pegids, GWAS_ID %in% geno_gwas_ids)
+  filter(Pegid %in% meth_pegids, GWAS_ID %in% geno_samples)
 
 cat(sprintf("Samples aligned (meth + geno): %d\n", nrow(aligned)))
 
-if (nrow(aligned)==0) {
+if (nrow(aligned) == 0) {
   stop("No samples align between methylation and genotype matrices")
 }
 
-# Subset and reorder both matrices to aligned samples
-meth_aligned <- meth_mat[, aligned$Pegid,  drop=FALSE]
-geno_aligned <- geno_mat[, aligned$GWAS_ID, drop=FALSE]
-
-# Rename genotype columns to Pegid for consistent MatrixEQTL input
-colnames(geno_aligned) <- aligned$Pegid
+meth_aligned <- meth_mat[, aligned$Pegid, drop=FALSE]
+rm(meth_mat); gc()
+# Note: geno matrix alignment is enforced when writing the SlicedData-ready
+# file below -- geno_samples retained for covariate intersection
 
 # ── Load covariates ───────────────────────────────────────────────────────────
 covar_df  <- read.csv(opt$covar_file, stringsAsFactors=FALSE,
@@ -99,7 +95,7 @@ cat(sprintf("First 3 meth col names:  %s\n",
     paste(head(colnames(meth_aligned), 3), collapse=", ")))
 
 # Three-way intersection: meth x geno x covar
-pegids_in_covar <- intersect(aligned$Pegid, colnames(covar_mat))
+pegids_in_covar <- Reduce(intersect, list(aligned$Pegid, geno_samples, colnames(covar_mat)))
 pegids_missing  <- setdiff(aligned$Pegid, colnames(covar_mat))
 
 cat(sprintf("Pegids in covar:  %d\n", length(pegids_in_covar)))
@@ -111,7 +107,7 @@ if (length(pegids_missing) > 0) {
   cat(paste(head(pegids_missing, 5), collapse=", "), "\n")
   aligned      <- aligned %>% filter(Pegid %in% pegids_in_covar)
   meth_aligned <- meth_aligned[, aligned$Pegid, drop=FALSE]
-  geno_aligned <- geno_aligned[, aligned$Pegid, drop=FALSE]
+  geno_samples <- aligned$GWAS_ID  # keep geno_samples in sync with aligned
 }
 
 if (nrow(aligned) == 0) {
@@ -123,6 +119,7 @@ covar_aligned <- covar_mat[, aligned$Pegid, drop=FALSE]
 
 # Ensure numeric storage (coercion from data.frame can produce character)
 storage.mode(covar_aligned) <- "double"
+rm(covar_df, covar_mat); gc()
 
 cat(sprintf("Final aligned samples: %d\n", ncol(covar_aligned)))
 cat(sprintf("Covariates: %d vars x %d samples\n",
@@ -132,39 +129,63 @@ cat(sprintf("Covariates: %d vars x %d samples\n",
 snp_pos <- fread(opt$snp_pos, data.table=FALSE)
 cpg_pos <- fread(opt$cpg_pos, data.table=FALSE)
 
-# Filter to SNPs/CpGs present in our matrices
-snp_pos <- snp_pos %>% filter(snp_id %in% rownames(geno_aligned))
-cpg_pos <- cpg_pos %>% filter(cpg_id %in% rownames(meth_aligned))
+# ── Write methylation and covariates to temp files ────────────────────────────
+# Genotypes stay on disk (geno_tsv) and are loaded directly via SlicedData.
+tmp_meth  <- tempfile(fileext = ".txt")
+tmp_covar <- tempfile(fileext = ".txt")
+on.exit(unlink(c(tmp_meth, tmp_covar)), add = TRUE)
 
-cat(sprintf("SNP positions: %d\n", nrow(snp_pos)))
-cat(sprintf("CpG positions: %d\n", nrow(cpg_pos)))
+write.table(meth_aligned,  tmp_meth,  sep = "\t", quote = FALSE)
+write.table(covar_aligned, tmp_covar, sep = "\t", quote = FALSE)
+rm(meth_aligned, covar_aligned); gc()
 
 # ── Build MatrixEQTL SlicedData objects ───────────────────────────────────────
-snp_data   <- SlicedData$new(); snp_data$CreateFromMatrix(geno_aligned)
-meth_data  <- SlicedData$new(); meth_data$CreateFromMatrix(meth_aligned)
-covar_data <- SlicedData$new(); covar_data$CreateFromMatrix(covar_aligned)
+snp_data   <- SlicedData$new()
+meth_data  <- SlicedData$new()
+covar_data <- SlicedData$new()
 
-# ── Run MatrixEQTL ────────────────────────────────────────────────────────────
-cat(sprintf("[%s] Running MatrixEQTL...\n", Sys.time()))
+# Load genotypes directly from bgzipped SNP-major file -- never fully in RAM
+snp_data$fileDelimiter      <- "\t"
+snp_data$fileOmitCharacters <- "NA"
+snp_data$fileSkipRows       <- 1
+snp_data$fileSkipColumns    <- 1
+snp_data$fileSliceSize      <- 500
+snp_data$LoadFile(opt$geno_tsv)
 
-# MatrixEQTL requires:
-#   snpspos: data.frame with columns snpid, chr, pos
-#   genepos: data.frame with columns geneid, chr, s1, s2
-# CpGs are single-base so s1 == s2
+meth_data$fileDelimiter      <- "\t"
+meth_data$fileOmitCharacters <- "NA"
+meth_data$fileSkipRows       <- 1
+meth_data$fileSkipColumns    <- 1
+meth_data$fileSliceSize      <- 1000
+meth_data$LoadFile(tmp_meth)
+
+covar_data$fileDelimiter      <- "\t"
+covar_data$fileOmitCharacters <- "NA"
+covar_data$fileSkipRows       <- 1
+covar_data$fileSkipColumns    <- 1
+covar_data$fileSliceSize      <- 1e6
+covar_data$LoadFile(tmp_covar)
+
+# ── Build position data frames (after SlicedData loaded -- rownames available)─
 snpspos_df <- snp_pos %>%
+  filter(snp_id %in% snp_data$GetAllRowNames()) %>%
   select(snpid=snp_id, chr, pos) %>%
   mutate(chr=as.character(chr))
 
 genepos_df <- cpg_pos %>%
+  filter(cpg_id %in% meth_data$GetAllRowNames()) %>%
   select(geneid=cpg_id, chr, s1=pos) %>%
   mutate(s2=s1, chr=as.character(chr))
 
-# Filter to SNPs/CpGs actually present in our matrices
-snpspos_df <- snpspos_df %>% filter(snpid %in% rownames(geno_aligned))
-genepos_df <- genepos_df %>% filter(geneid %in% rownames(meth_aligned))
-
 cat(sprintf("SNP positions for MatrixEQTL: %d\n", nrow(snpspos_df)))
 cat(sprintf("CpG positions for MatrixEQTL: %d\n", nrow(genepos_df)))
+
+# ── Memory state before MatrixEQTL ───────────────────────────────────────────
+cat(sprintf("[%s] Memory before MatrixEQTL: %.1f MB used\n",
+    Sys.time(), sum(gc()[,2]) * 8 / 1024))
+
+# ── Run MatrixEQTL ────────────────────────────────────────────────────────────
+cat(sprintf("[%s] Running MatrixEQTL...\n", Sys.time()))
 
 me <- Matrix_eQTL_main(
   snps                  = snp_data,
@@ -182,9 +203,10 @@ me <- Matrix_eQTL_main(
   cisDist               = opt$cis_dist,
   pvalue.hist           = FALSE,
   min.pv.by.genesnp     = FALSE,
-  noFDRsaveMemory       = FALSE
+  noFDRsaveMemory       = TRUE
 )
 
+rm(snpspos_df, genepos_df, snp_pos, cpg_pos); gc()
 cat(sprintf("[%s] Complete.\n", Sys.time()))
 cat(sprintf("Cis mQTLs  (p < %.0e): %d\n", opt$pval_cis,  me$cis$neqtls))
 cat(sprintf("Trans mQTLs (p < %.0e): %d\n", opt$pval_trans, me$trans$neqtls))

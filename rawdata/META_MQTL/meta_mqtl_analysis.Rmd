@@ -9,6 +9,9 @@ output:
     toc_depth: 3
     theme: flatly
     code_folding: show
+  pdf_document:
+    toc: true
+    toc_depth: '3'
 ---
 
 ```{r setup, include=FALSE}
@@ -58,16 +61,6 @@ META_DIR <- "results/meta"
 dir.create(META_DIR, recursive=TRUE, showWarnings=FALSE)
 dir.create("results/qc", recursive=TRUE, showWarnings=FALSE)
 
-# ── SNP position files for ID normalisation ──────────────────────────────────
-# Used to translate dataset-specific SNP IDs to chr:pos format
-SNP_POS_FILES <- list(
-  peg1_cases    = "../PEG_MQTL/results/positions/snp_positions.csv",
-  peg1_controls = "../PEG_MQTL/results/positions/snp_positions.csv",
-  peg2_cases    = "../PEG_MQTL/results/positions/snp_positions.csv",
-  ppmi_cases    = "../PPMI_MQTL/results/positions/snp_positions.csv",
-  ppmi_controls = "../PPMI_MQTL/results/positions/snp_positions.csv"
-)
-
 # Labels and colors
 DATASET_LABELS <- c(
   peg1_cases    = "PEG1 Cases",
@@ -91,7 +84,7 @@ DATASET_COLORS <- c(
 # 2. Load mQTL Results
 
 ```{r load-results, cache=TRUE}
-load_mqtl <- function(path, dataset_name, snp_pos_file=NULL) {
+load_mqtl <- function(path, dataset_name) {
   if (!file.exists(path)) {
     warning(sprintf("File not found: %s", path))
     return(NULL)
@@ -126,21 +119,18 @@ load_mqtl <- function(path, dataset_name, snp_pos_file=NULL) {
   }
 
   # ── Normalise SNP IDs to chr:pos so pair_id matches across cohorts ─────────
-  # PEG uses GSA-rsXXXX; PPMI uses chr:pos:ref:alt — neither matches the other.
-  # Translating both to chr:pos via position lookup files creates a common key.
-  if (!is.null(snp_pos_file) && file.exists(snp_pos_file)) {
-    snp_pos <- fread(snp_pos_file, data.table=FALSE) %>%
-      mutate(chrpos = paste0(as.character(chr), ":", as.integer(pos)))
-    id_to_chrpos       <- setNames(snp_pos$chrpos, snp_pos$snp_id)
-    mapped             <- id_to_chrpos[dat$snp_id]
-    dat$snp_chrpos     <- ifelse(is.na(mapped), dat$snp_id, mapped)
-    cat(sprintf("  %-20s: %s mapped, %s unmapped SNP IDs\n",
-        dataset_name,
-        format(sum(!is.na(mapped)), big.mark=","),
-        format(sum( is.na(mapped)), big.mark=",")))
-  } else {
-    dat$snp_chrpos <- dat$snp_id
-  }
+  # PEG SNP IDs are already chr:pos (e.g. "1:1446221") from imputation.
+  # PPMI SNP IDs are chr:pos:ref:alt (e.g. "1:1365759:G:A") from WGS.
+  # Stripping any trailing :REF:ALT normalises both to a common chr:pos key
+  # without needing a lookup join, which avoids brittleness if the position
+  # files and mQTL output ever drift out of sync.
+  dat$snp_chrpos <- sub("^([0-9XYM]+:[0-9]+):[ACGT]+:[ACGT]+$", "\\1", dat$snp_id)
+
+  n_stripped <- sum(dat$snp_chrpos != dat$snp_id)
+  cat(sprintf("  %-20s: %s SNP IDs had allele suffix stripped (%s unchanged)\n",
+      dataset_name,
+      format(n_stripped, big.mark=","),
+      format(nrow(dat) - n_stripped, big.mark=",")))
 
   dat <- dat %>%
     mutate(
@@ -158,7 +148,7 @@ load_mqtl <- function(path, dataset_name, snp_pos_file=NULL) {
 
 cat("Loading cis mQTL results:\n")
 mqtl_list <- imap(RESULTS, function(path, nm) {
-  load_mqtl(path, nm, snp_pos_file=SNP_POS_FILES[[nm]])
+  load_mqtl(path, nm)
 })
 mqtl_list <- Filter(Negate(is.null), mqtl_list)
 
@@ -172,10 +162,10 @@ cat(sprintf("\nDatasets loaded: %d / %d\n",
 
 ## 3.1 Result Summary
 
-> **Note on Lambda GC:** Lambda GC is not reported here because MatrixEQTL
+> **Note on Lambda GC:** Lambda GC is not reported here because MatrixEQTLdo
 > outputs only associations passing the significance threshold
-> (`pval_cis = 1e-3`). Computing lambda on a filtered tail of the p-value
-> distribution produces artificially inflated values (30–40×) that are
+> (`pval_cis = 1e-5`). Computing lambda on a filtered tail of the p-value
+> distribution produces artificially inflated values that are
 > meaningless. Lambda GC is only valid when computed on the complete null
 > distribution. QQ plots in Section 3.2 provide valid visual QC for the
 > significant associations we do have.
@@ -186,44 +176,65 @@ summary_df <- imap_dfr(mqtl_list, function(dat, nm) {
     dataset     = nm,
     label       = DATASET_LABELS[nm],
     n_assoc     = nrow(dat),
-    n_fdr05     = sum(dat$FDR    < 0.05,  na.rm=TRUE),
-    n_fdr10     = sum(dat$FDR    < 0.10,  na.rm=TRUE),
     n_p1e5      = sum(dat$pvalue < 1e-5,  na.rm=TRUE),
     n_p1e8      = sum(dat$pvalue < 1e-8,  na.rm=TRUE),
-    pct_fdr05   = round(100 * mean(dat$FDR < 0.05, na.rm=TRUE), 1),
     median_beta = round(median(abs(dat$beta), na.rm=TRUE), 4),
     max_beta    = round(max(abs(dat$beta),    na.rm=TRUE), 4),
+    n_extreme   = sum(abs(dat$beta) > 1,   na.rm=TRUE),
     stringsAsFactors = FALSE
   )
 })
 
 summary_df %>%
   mutate(
-    n_assoc  = format(n_assoc,  big.mark=","),
-    n_fdr05  = format(n_fdr05,  big.mark=","),
-    n_fdr10  = format(n_fdr10,  big.mark=","),
-    n_p1e5   = format(n_p1e5,   big.mark=","),
-    n_p1e8   = format(n_p1e8,   big.mark=",")
+    n_assoc = format(n_assoc, big.mark=","),
+    n_p1e5  = format(n_p1e5,  big.mark=","),
+    n_p1e8  = format(n_p1e8,  big.mark=",")
   ) %>%
-  select(label, n_assoc, n_fdr05, n_fdr10, n_p1e5, n_p1e8,
-         pct_fdr05, median_beta, max_beta) %>%
+  select(label, n_assoc, n_p1e5, n_p1e8, median_beta, max_beta, n_extreme) %>%
   knitr::kable(
-    col.names = c("Dataset", "N assoc", "FDR<0.05", "FDR<0.10",
-                  "p<1e-5", "p<1e-8", "% FDR<0.05",
-                  "Median |β|", "Max |β|"),
-    caption   = "Summary of cis-mQTL results (output at p < 1e-3 threshold)"
+    col.names = c("Dataset", "N assoc", "p<1e-5", "p<1e-8",
+                  "Median |β|", "Max |β|", "N |β|>1 (outliers)"),
+    caption   = "Summary of cis-mQTL results (output at p < 1e-5 threshold).
+                 FDR not computed per-dataset: MatrixEQTL ran with
+                 noFDRsaveMemory=TRUE and pre-filtered output makes
+                 per-dataset BH correction invalid. FDR_BH is computed
+                 on meta-analysis p-values in Section 5."
   )
+
+# ── Flag extreme beta values ──────────────────────────────────────────────────
+# Methylation beta values should be bounded 0-1. Effect sizes (beta) in mQTL
+# analysis represent change in methylation per unit allele dosage and should
+# therefore be well within [-1, 1] for a properly scaled analysis.
+# Values >> 1 indicate a scaling issue in the methylation or covariate matrix.
+extreme_datasets <- summary_df %>% filter(max_beta > 1)
+if (nrow(extreme_datasets) > 0) {
+  cat("\n⚠️  WARNING: Extreme beta values detected (|β| > 1):\n")
+  for (i in seq_len(nrow(extreme_datasets))) {
+    cat(sprintf("   %-20s: max|β| = %.2f, n outliers = %s\n",
+                extreme_datasets$dataset[i],
+                extreme_datasets$max_beta[i],
+                format(extreme_datasets$n_extreme[i], big.mark=",")))
+  }
+  cat("\n   This most likely indicates a scaling issue in the PPMI methylation\n")
+  cat("   or covariate matrix. Possible causes:\n")
+  cat("   - Methylation matrix not in beta [0,1] scale (e.g. M-values used)\n")
+  cat("   - A covariate column with large numeric range (e.g. age in years\n")
+  cat("     not standardised) creating numerical instability in MatrixEQTL\n")
+  cat("   - Batch variable included without dummy-coding\n")
+  cat("   Recommend investigating PPMI results before proceeding with meta-analysis.\n")
+}
 ```
 
 ```{r counts-plot, fig.height=4}
-# Bar chart of association counts at different thresholds
+# Bar chart of association counts at different p-value thresholds
 summary_df %>%
-  select(label, dataset, n_fdr05, n_p1e5, n_p1e8) %>%
-  pivot_longer(c(n_fdr05, n_p1e5, n_p1e8),
+  select(label, dataset, n_p1e5, n_p1e8) %>%
+  pivot_longer(c(n_p1e5, n_p1e8),
                names_to="threshold", values_to="n") %>%
   mutate(threshold = factor(threshold,
-    levels = c("n_fdr05", "n_p1e5", "n_p1e8"),
-    labels = c("FDR < 0.05", "p < 1e-5", "p < 1e-8"))) %>%
+    levels = c("n_p1e5", "n_p1e8"),
+    labels = c("p < 1e-5", "p < 1e-8"))) %>%
   ggplot(aes(x=label, y=n, fill=dataset)) +
   geom_col(position="dodge", width=0.7) +
   scale_fill_manual(values=DATASET_COLORS, guide="none") +
@@ -249,7 +260,6 @@ make_qq <- function(pvalues, title, color="steelblue", max_pts=1e6) {
   exp <- -log10(ppoints(n))
   ci_hi <- -log10(qbeta(0.025, seq_len(n), n - seq_len(n) + 1))
   ci_lo <- -log10(qbeta(0.975, seq_len(n), n - seq_len(n) + 1))
-  lam <- lambda_gc(pvalues)
 
   ggplot(data.frame(exp=exp, obs=obs,
                     ci_hi=sort(ci_hi), ci_lo=sort(ci_lo)),
@@ -260,8 +270,7 @@ make_qq <- function(pvalues, title, color="steelblue", max_pts=1e6) {
     geom_abline(slope=1, intercept=0,
                 color="red", linewidth=0.7) +
     labs(title    = title,
-         subtitle = sprintf("λ = %.4f  |  n = %s",
-                            lam, format(n, big.mark=",")),
+         subtitle = sprintf("n = %s", format(n, big.mark=",")),
          x="Expected  –log₁₀(p)",
          y="Observed  –log₁₀(p)") +
     theme_minimal(base_size=11) +

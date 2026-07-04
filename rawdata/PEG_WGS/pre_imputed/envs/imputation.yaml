@@ -1,0 +1,11 @@
+name: peg_imputation_env
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - bcftools=1.19
+  - htslib=1.19
+  - plink2=2.00a5
+  - python=3.11
+  - pandas

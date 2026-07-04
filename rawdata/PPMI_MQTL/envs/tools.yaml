@@ -1,0 +1,7 @@
+name: ppmi_mqtl_tools_env
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - plink2=2.00a5

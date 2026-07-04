@@ -1,0 +1,15 @@
+name: ppmi_mqtl_r_env
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - r-base=4.3
+  - r-tidyverse
+  - r-data.table
+  - r-matrixeqtl
+  - r-optparse
+  - bioconductor-illuminahumanmethylationepicv2anno.20a1.hg38
+  - bioconductor-illuminahumanmethylationepicv2manifest
+  - bioconductor-illuminahumanmethylationepicanno.ilm10b4.hg19
+  - bioconductor-minfi

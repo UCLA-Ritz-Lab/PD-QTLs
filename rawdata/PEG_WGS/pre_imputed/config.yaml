@@ -1,0 +1,70 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# PEG Genotype Imputation Pre-Processing Pipeline
+# Input:  PEG_PD.phased.vcf.gz (multi-sample, hg19, phased)
+# Output: Per-chromosome VCFs ready for Michigan Imputation Server
+#         with TOPMed r2 reference panel
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Input VCF
+vcf: "Downloads/PEG_PD.phased.vcf.gz"
+
+# Output directory
+out_dir: "results"
+
+# Reference genome (hg19 — Michigan accepts hg19 with TOPMed r2)
+ref_fasta: "../PPMI_WGS/resources/hg19.fa"
+
+# Chromosomes to process (autosomes only for mQTL)
+chromosomes:
+  - "1"
+  - "2"
+  - "3"
+  - "4"
+  - "5"
+  - "6"
+  - "7"
+  - "8"
+  - "9"
+  - "10"
+  - "11"
+  - "12"
+  - "13"
+  - "14"
+  - "15"
+  - "16"
+  - "17"
+  - "18"
+  - "19"
+  - "20"
+  - "21"
+  - "22"
+
+# ── QC filters ────────────────────────────────────────────────────────────────
+qc:
+  # Remove duplicate positions (same chr:pos, different alleles)
+  remove_duplicates: true
+  # MAF filter — Michigan recommends removing very rare variants pre-imputation
+  # since they inflate the imputation error rate
+  min_maf: 0.01
+  # Maximum per-variant missingness
+  max_missing: 0.05
+  # HWE filter (applied to controls only if phenotype available)
+  hwe_pval: 1e-6
+  # Remove indels — TOPMed imputation focuses on SNPs
+  # Set to false if you want indels imputed too
+  snps_only: true
+
+# ── Michigan Imputation Server settings (for reference/documentation) ─────────
+# These are applied on the server, not in this pipeline,
+# but documenting them here for reproducibility.
+michigan:
+  server:    "https://imputationserver.sph.umich.edu"
+  panel:     "TOPMed r2"
+  build:     "hg19"
+  phasing:   "eagle"      # already phased — server will use existing phase
+  population: "mixed"     # use 'mixed' for admixed cohorts (PEG is diverse)
+  mode:      "imputation"
+
+# ── Compute resources ─────────────────────────────────────────────────────────
+resources:
+  threads: 4

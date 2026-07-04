@@ -1,0 +1,174 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# PPMI WGS Pre-Imputation Pipeline (resumed from merged VCF)
+#
+# The per-sample VCFs (PPMISI*.vcf.gz) were lost. This pipeline resumes
+# from the merged filtered VCF which was already generated:
+#   results/merged/merged.filtered.vcf.gz
+#
+# Steps:
+#   5. split_by_chrom         — split merged VCF into per-chromosome VCFs
+#   6. prepare_for_imputation — site QC + MIS-compatible VCF per chromosome
+#   7. pre_imputation_report  — variant counts per chromosome
+#
+# Steps 1-4 (index, normalize, merge, filter) are omitted since their outputs
+# already exist. Re-run the full pipeline once the source VCFs are recovered.
+#
+# Post-imputation steps live in ../post_imputed/Snakefile
+# ──────────────────────────────────────────────────────────────────────────────
+
+import os
+
+configfile: "config.yaml"
+
+CHROMS = config["chromosomes"]
+OUT    = config["out_dir"]
+
+print(f"Processing {len(CHROMS)} chromosomes from merged VCF.")
+
+
+# ── Targets ───────────────────────────────────────────────────────────────────
+rule all:
+    input:
+        expand("{out}/for_imputation/{chrom}.vcf.gz",
+               out=OUT, chrom=CHROMS),
+        expand("{out}/for_imputation/{chrom}.vcf.gz.tbi",
+               out=OUT, chrom=CHROMS),
+        f"{OUT}/qc/pre_imputation_report.txt"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 5: Split merged VCF by chromosome
+# Input: the already-generated merged.filtered.vcf.gz
+# ──────────────────────────────────────────────────────────────────────────────
+rule split_by_chrom:
+    input:
+        vcf = f"{OUT}/merged/merged.filtered.vcf.gz",
+        tbi = f"{OUT}/merged/merged.filtered.vcf.gz.tbi"
+    output:
+        vcf = f"{OUT}/by_chrom/{{chrom}}.vcf.gz",
+        tbi = f"{OUT}/by_chrom/{{chrom}}.vcf.gz.tbi"
+    conda:
+        "envs/bcftools.yaml"
+    threads:
+        config["resources"]["threads_bcftools"]
+    log:
+        f"{OUT}/logs/split/{{chrom}}.log"
+    shell:
+        """
+        set -euo pipefail
+
+        bcftools view \
+            --regions {wildcards.chrom} \
+            --output-type z \
+            --threads {threads} \
+            --output {output.vcf} \
+            {input.vcf} \
+        2> {log}
+
+        tabix -p vcf {output.vcf} 2>> {log}
+
+        n=$(bcftools stats {output.vcf} | grep "^SN.*number of SNPs" | cut -f4)
+        echo "chr{wildcards.chrom}: $n variants after split" >> {log}
+        """
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 6: Prepare per-chromosome VCFs for Michigan Imputation Server
+#
+# MIS requirements:
+#   - Biallelic SNPs only (no indels, no multiallelic)
+#   - MAF >= 0.01
+#   - No duplicate positions
+#   - Chromosome names numeric (1-22, no "chr" prefix) — already the case
+#   - bgzipped + tabix indexed
+# ──────────────────────────────────────────────────────────────────────────────
+rule prepare_for_imputation:
+    input:
+        vcf = f"{OUT}/by_chrom/{{chrom}}.vcf.gz",
+        tbi = f"{OUT}/by_chrom/{{chrom}}.vcf.gz.tbi"
+    output:
+        vcf = f"{OUT}/for_imputation/{{chrom}}.vcf.gz",
+        tbi = f"{OUT}/for_imputation/{{chrom}}.vcf.gz.tbi"
+    conda:
+        "envs/bcftools.yaml"
+    threads:
+        config["resources"]["threads_bcftools"]
+    log:
+        f"{OUT}/logs/for_imputation/{{chrom}}.log"
+    shell:
+        """
+        set -euo pipefail
+        mkdir -p {OUT}/for_imputation
+
+        bcftools view \
+            --min-alleles 2 \
+            --max-alleles 2 \
+            --type snps \
+            --output-type u \
+            {input.vcf} \
+            2>> {log} \
+        | bcftools filter \
+            --include 'F_MISSING <= 0.05' \
+            --output-type u \
+            2>> {log} \
+        | bcftools view \
+            --min-af 0.01:minor \
+            --output-type u \
+            2>> {log} \
+        | bcftools norm \
+            --rm-dup all \
+            --output-type z \
+            --output {output.vcf} \
+            2>> {log}
+
+        tabix -p vcf {output.vcf} 2>> {log}
+
+        n=$(bcftools stats {output.vcf} | grep "^SN.*number of SNPs" | cut -f4)
+        echo "chr{wildcards.chrom}: $n variants ready for imputation" >> {log}
+        """
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 7: Pre-imputation QC report
+# ──────────────────────────────────────────────────────────────────────────────
+rule pre_imputation_report:
+    input:
+        vcfs = expand(
+            f"{OUT}/for_imputation/{{chrom}}.vcf.gz",
+            chrom=CHROMS
+        )
+    output:
+        report = f"{OUT}/qc/pre_imputation_report.txt"
+    conda:
+        "envs/bcftools.yaml"
+    log:
+        f"{OUT}/logs/qc/pre_imputation_report.log"
+    shell:
+        """
+        set -euo pipefail
+        mkdir -p {OUT}/qc
+
+        echo "=== PPMI WGS Pre-Imputation QC Report ==="  >  {output.report}
+        echo "Reference panel target: HRC r1.1 2016 (GRCh37/hg19)" >> {output.report}
+        echo "Resumed from: results/merged/merged.filtered.vcf.gz"  >> {output.report}
+        echo ""                                                       >> {output.report}
+        printf "%-6s %12s\n" "CHROM" "N_VARIANTS"                  >> {output.report}
+        printf "%-6s %12s\n" "-----" "----------"                  >> {output.report}
+
+        total=0
+        for chrom in {CHROMS}; do
+            vcf="{OUT}/for_imputation/${{chrom}}.vcf.gz"
+            n=$(bcftools stats "$vcf" | grep "^SN.*number of SNPs" | cut -f4)
+            printf "%-6s %12s\n" "$chrom" "$n" >> {output.report}
+            total=$((total + n))
+        done
+
+        echo ""                                                         >> {output.report}
+        echo "Total variants: $total"                                   >> {output.report}
+        echo ""                                                         >> {output.report}
+        echo "Files ready for MIS upload: {OUT}/for_imputation/"       >> {output.report}
+        echo "Server: https://imputationserver.sph.umich.edu"          >> {output.report}
+        echo "Panel:  HRC r1.1 2016 | Build: GRCh37/hg19 | Pop: EUR"  >> {output.report}
+
+        cat {output.report}
+        """

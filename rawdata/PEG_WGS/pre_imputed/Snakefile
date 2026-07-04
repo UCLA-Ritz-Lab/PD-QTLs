@@ -1,0 +1,235 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# PEG Genotype Imputation Pre-Processing Pipeline
+#
+# Prepares PEG_PD.phased.vcf.gz for upload to Michigan Imputation Server
+# with TOPMed r2 reference panel.
+#
+# Steps:
+#   1. qc_filter        — site-level QC on the full VCF
+#   2. split_by_chrom   — split into per-chromosome VCFs
+#   3. normalize        — left-align, decompose, sort per chromosome
+#   4. final_qc         — bcftools stats per chromosome
+#   5. qc_report        — summary report + upload checklist
+# ──────────────────────────────────────────────────────────────────────────────
+
+configfile: "config.yaml"
+
+OUT    = config["out_dir"]
+CHROMS = config["chromosomes"]
+
+# ──────────────────────────────────────────────────────────────────────────────
+rule all:
+    input:
+        # Per-chromosome VCFs ready for upload
+        expand("{out}/upload/chr{chrom}.vcf.gz",
+               out=OUT, chrom=CHROMS),
+        expand("{out}/upload/chr{chrom}.vcf.gz.tbi",
+               out=OUT, chrom=CHROMS),
+        # QC report
+        f"{OUT}/qc/imputation_qc_report.txt"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 1: Site-level QC on the full VCF
+#   - Remove multiallelic sites (Michigan requires biallelic)
+#   - Remove indels if snps_only=true
+#   - MAF and missingness filter
+#   - Remove duplicate positions (same chr:pos, keep first by MAF)
+# ──────────────────────────────────────────────────────────────────────────────
+rule qc_filter:
+    input:
+        vcf = config["vcf"]
+    output:
+        vcf = f"{OUT}/qc/peg_qc.vcf.gz",
+        tbi = f"{OUT}/qc/peg_qc.vcf.gz.tbi"
+    conda:
+        "envs/imputation.yaml"
+    threads:
+        config["resources"]["threads"]
+    params:
+        min_maf     = config["qc"]["min_maf"],
+        max_missing = config["qc"]["max_missing"],
+        hwe_pval    = config["qc"]["hwe_pval"],
+        type_flag   = "--type snps" if config["qc"]["snps_only"] else ""
+    log:
+        f"{OUT}/logs/qc_filter.log"
+    shell:
+        """
+        set -euo pipefail
+
+        echo "Step 1: Site-level QC..." 2>> {log}
+
+        bcftools view \
+            --max-alleles 2 \
+            --min-alleles 2 \
+            {params.type_flag} \
+            --output-type u \
+            {input.vcf} \
+        2>> {log} \
+        | bcftools filter \
+            --include 'F_MISSING <= {params.max_missing}' \
+            --output-type u \
+        2>> {log} \
+        | bcftools view \
+            --min-af {params.min_maf}:minor \
+            --output-type u \
+        2>> {log} \
+        | bcftools norm \
+            --rm-dup all \
+            --output-type z \
+            --output {output.vcf} \
+        2>> {log}
+
+        tabix -p vcf {output.vcf} 2>> {log}
+
+        echo "QC complete. Variant count:" 2>> {log}
+        bcftools stats {output.vcf} | grep "^SN.*number of SNPs" >> {log}
+        """
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 2: Split into per-chromosome VCFs
+# Michigan requires one VCF per chromosome
+# ──────────────────────────────────────────────────────────────────────────────
+rule split_by_chrom:
+    input:
+        vcf = f"{OUT}/qc/peg_qc.vcf.gz",
+        tbi = f"{OUT}/qc/peg_qc.vcf.gz.tbi"
+    output:
+        vcf = f"{OUT}/by_chrom/chr{{chrom}}.vcf.gz",
+        tbi = f"{OUT}/by_chrom/chr{{chrom}}.vcf.gz.tbi"
+    conda:
+        "envs/imputation.yaml"
+    threads: 1
+    log:
+        f"{OUT}/logs/split/chr{{chrom}}.log"
+    shell:
+        """
+        set -euo pipefail
+
+        bcftools view \
+            --regions {wildcards.chrom} \
+            --output-type z \
+            --output {output.vcf} \
+            {input.vcf} \
+        2> {log}
+
+        tabix -p vcf {output.vcf} 2>> {log}
+
+        n=$(bcftools stats {output.vcf} | grep "^SN.*number of SNPs" | cut -f4)
+        echo "chr{wildcards.chrom}: $n SNPs" >> {log}
+        """
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 3: Normalize per-chromosome VCFs
+#   - Left-align indels (if any remain)
+#   - Ensure chromosome names match Michigan expectations (bare 1,2,3 not chr1)
+#   - Sort by position
+#   Michigan requires: phased GT, no missing GT, sorted by position
+# ──────────────────────────────────────────────────────────────────────────────
+rule normalize_chrom:
+    input:
+        vcf = f"{OUT}/by_chrom/chr{{chrom}}.vcf.gz",
+        tbi = f"{OUT}/by_chrom/chr{{chrom}}.vcf.gz.tbi",
+        ref = config["ref_fasta"]
+    output:
+        vcf = f"{OUT}/normalized/chr{{chrom}}.vcf.gz",
+        tbi = f"{OUT}/normalized/chr{{chrom}}.vcf.gz.tbi"
+    conda:
+        "envs/imputation.yaml"
+    threads: 1
+    log:
+        f"{OUT}/logs/normalize/chr{{chrom}}.log"
+    shell:
+        """
+        set -euo pipefail
+
+        bcftools norm \
+            --fasta-ref {input.ref} \
+            --check-ref w \
+            --multiallelics -snps \
+            --output-type u \
+            {input.vcf} \
+        2> {log} \
+        | bcftools sort \
+            --output-type z \
+            --output {output.vcf} \
+        2>> {log}
+
+        tabix -p vcf {output.vcf} 2>> {log}
+        """
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 4: Final preparation for upload
+#   Michigan Imputation Server requirements:
+#   - Phased GT (already satisfied — input is phased)
+#   - No missing genotypes (set missing to major allele homozygous)
+#   - Chromosome names without 'chr' prefix (already satisfied for hg19)
+#   - Sorted by position
+#   - bgzipped and tabix indexed
+#   - Maximum 20,000 samples per file (PEG is well under this)
+# ──────────────────────────────────────────────────────────────────────────────
+rule prepare_upload:
+    input:
+        vcf = f"{OUT}/normalized/chr{{chrom}}.vcf.gz",
+        tbi = f"{OUT}/normalized/chr{{chrom}}.vcf.gz.tbi"
+    output:
+        vcf  = f"{OUT}/upload/chr{{chrom}}.vcf.gz",
+        tbi  = f"{OUT}/upload/chr{{chrom}}.vcf.gz.tbi",
+        stat = f"{OUT}/qc/chr{{chrom}}.stats"
+    conda:
+        "envs/imputation.yaml"
+    threads: 1
+    log:
+        f"{OUT}/logs/upload/chr{{chrom}}.log"
+    shell:
+        """
+        set -euo pipefail
+
+        # Set any remaining missing genotypes to 0|0 (ref homozygous)
+        # Michigan cannot handle missing genotypes
+        bcftools +setGT \
+            {input.vcf} \
+            -- -t . -n 0p \
+        2> {log} \
+        | bcftools view \
+            --output-type z \
+            --output {output.vcf} \
+        2>> {log}
+
+        tabix -p vcf {output.vcf} 2>> {log}
+
+        # Generate stats for QC report
+        bcftools stats {output.vcf} > {output.stat} 2>> {log}
+
+        echo "chr{wildcards.chrom} ready for upload" >> {log}
+        """
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 5: QC report and upload checklist
+# ──────────────────────────────────────────────────────────────────────────────
+rule qc_report:
+    input:
+        stats = expand(
+            f"{OUT}/qc/chr{{chrom}}.stats",
+            chrom=CHROMS
+        )
+    output:
+        report = f"{OUT}/qc/imputation_qc_report.txt"
+    conda:
+        "envs/imputation.yaml"
+    threads: 1
+    log:
+        f"{OUT}/logs/qc_report.log"
+    shell:
+        """
+        python scripts/qc_report.py \
+            --stats_dir {OUT}/qc \
+            --out_report {output.report} \
+        2> {log}
+
+        cat {output.report}
+        """
