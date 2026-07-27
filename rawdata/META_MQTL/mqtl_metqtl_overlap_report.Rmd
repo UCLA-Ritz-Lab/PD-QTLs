@@ -1,0 +1,551 @@
+---
+title: "PPMI-PEG mQTL / metQTL Overlap Analysis"
+subtitle: "Longitudinal mQTL meta-hits overlapped with PEG1 metabolomics QTLs, annotated via Ensembl"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = TRUE, message = FALSE)
+library(dplyr)
+library(readr)
+library(tidyr)
+library(stringr)
+library(ggplot2)
+library(httr)
+library(jsonlite)
+library(purrr)
+library(knitr)
+```
+
+## Overview
+
+This report combines four analysis stages:
+
+1. **metQTL FDR handling and overlap** — combining PEG1 c18 + hilic trans-metQTL
+   results, and overlapping FDR-significant SNP-metabolite pairs against the
+   classified longitudinal PPMI mQTL results (from the meta-analysis hit list,
+   re-tested with a mixed model across follow-up visits).
+2. **Gene annotation** — resolving the overlapping SNPs to nearest/overlapping
+   genes via the Ensembl REST API, since a shared SNP driving both a
+   methylation and a metabolite association is the strongest signal of a
+   pleiotropic locus worth following up.
+3. **PD GWAS overlap and union table** — checking whether the case
+   meta-analysis mQTL hits fall near a known PD risk locus from Nalls et al.
+   (2019, Table S2), then building a union table of case hits supported by
+   *either* the metQTL overlap *or* GWAS proximity (or both).
+4. **Metabolite compound annotation** — resolving as many of the overlap
+   metabolite features as possible from their raw `mz_rt` labels to putative
+   compound identities, via xmsannotator mass/retention-time matching against
+   HMDB, KEGG, and LipidMaps (see Step 6).
+
+Metabolite features (`C18_mz_rt_...` / `HILIC_mz_rt_...`) are carried under
+their original mass-spec feature labels through Steps 1-5. No collaborator
+compound-ID mapping table ever materialized, so Step 6 instead resolves them
+independently via xmsannotator mass/retention-time matching — with partial
+coverage (23/33 features get any match, 11/33 a high-confidence named
+compound; see Step 6 for caveats).
+
+**A methodological note carried through this analysis:** the `trans_metqtls.txt`
+files were generated with a liberal `pvOutputThreshold` (1e-2) and then
+manually truncated to the first 10M p-value-sorted rows to avoid an
+out-of-memory error on load. This means the file is *not* the full test space
+— a BH correction recomputed on this file alone would be invalid, since it
+would rank an already-preselected low-p subset against itself rather than
+against the true, much larger, denominator of all tests performed. We
+confirmed the truncation only cut into the non-significant tail (FDR ~0.75-0.85
+at the last retained row of every file) and therefore use **MatrixEQTL's own
+per-file FDR column** rather than recomputing it — treating c18 and hilic as
+separate multiple-testing families rather than one merged correction, since a
+combined correction isn't recoverable from truncated data anyway.
+
+---
+
+## Step 1: Combine metQTL results and apply FDR filtering
+
+```{r combine-metqtl, cache=TRUE, cache.lazy=FALSE}
+combine_and_fdr <- function(group_label, files, fdr_threshold = 0.05) {
+
+  combined <- bind_rows(lapply(files, function(f) {
+    read_tsv(f, col_types = cols(SNP = col_character(), gene = col_character(),
+                                  beta = col_double(), `t-stat` = col_double(),
+                                  `p-value` = col_double(), FDR = col_double()),
+              guess_max = Inf) %>%
+      mutate(source_file = basename(dirname(f)))
+  }))
+
+  sig <- combined %>% filter(FDR < fdr_threshold)
+
+  out_all <- sprintf("peg1_%s_metqtl_combined_fdr.csv", group_label)
+  out_sig <- sprintf("peg1_%s_metqtl_sig_fdr05.csv", group_label)
+  write_csv(combined, out_all)
+  write_csv(sig, out_sig)
+
+  list(combined = combined, sig = sig)
+}
+
+cases_metqtl    <- combine_and_fdr(
+  "cases",
+  c("../PEG_METAB/results/metqtl/c18_peg1_cases/trans_metqtls.txt",
+    "../PEG_METAB/results/metqtl/hilic_peg1_cases/trans_metqtls.txt")
+)
+
+controls_metqtl <- combine_and_fdr(
+  "controls",
+  c("../PEG_METAB/results/metqtl/c18_peg1_controls/trans_metqtls.txt",
+    "../PEG_METAB/results/metqtl/hilic_peg1_controls/trans_metqtls.txt")
+)
+
+metqtl_cases_sig    <- cases_metqtl$sig
+metqtl_controls_sig <- controls_metqtl$sig
+```
+
+```{r metqtl-summary}
+metqtl_summary <- tibble(
+  group           = c("Cases", "Controls"),
+  total_tests     = c(nrow(cases_metqtl$combined), nrow(controls_metqtl$combined)),
+  fdr_sig_pairs   = c(nrow(metqtl_cases_sig), nrow(metqtl_controls_sig))
+)
+kable(metqtl_summary, caption = "PEG1 metQTL: total tests combined (c18+hilic) and FDR<0.05 pairs")
+```
+
+---
+
+## Step 2: Overlap with classified longitudinal mQTL results
+
+Overlap is defined by shared SNP identity, cases-vs-cases and
+controls-vs-controls kept separate (different populations, not
+directly comparable). A single pleiotropic SNP can legitimately show up with
+multiple significant CpGs *and* multiple significant metabolites — that
+many-to-many structure is expected biology, not a join error.
+
+```{r overlap-mqtl-metqtl, cache=TRUE}
+overlap_group <- function(group_label, mqtl_classified_file, metqtl_sig) {
+
+  mqtl <- read_csv(mqtl_classified_file,
+                    col_types = cols(pair_id = col_character(), snp_id = col_character(),
+                                      cpg_id = col_character(), status = col_character(),
+                                      warnings = col_character(), category = col_character(),
+                                      same_sign_as_meta = col_logical(), replicated = col_logical(),
+                                      dynamic = col_logical(), .default = col_double()),
+                    guess_max = Inf)
+
+  overlap <- mqtl %>%
+    inner_join(metqtl_sig, by = c("snp_id" = "SNP"), relationship = "many-to-many") %>%
+    rename(metabolite_feature = gene, metqtl_beta = beta, metqtl_pval = `p-value`, metqtl_fdr = FDR)
+
+  write_csv(overlap, sprintf("mqtl_metqtl_overlap_%s.csv", group_label))
+  overlap
+}
+
+overlap_cases <- overlap_group("cases",
+  "../PPMI_LONG/longitudinal_mqtl_cases_classified.csv", metqtl_cases_sig)
+
+overlap_controls <- overlap_group("controls",
+  "../PPMI_LONG/longitudinal_mqtl_controls_classified.csv", metqtl_controls_sig)
+```
+
+```{r overlap-summary}
+overlap_summary <- tibble(
+  group                = c("Cases", "Controls"),
+  mqtl_pairs_tested     = c(18986, 15282),
+  metqtl_sig_pairs       = c(nrow(metqtl_cases_sig), nrow(metqtl_controls_sig)),
+  unique_shared_snps     = c(n_distinct(overlap_cases$snp_id), n_distinct(overlap_controls$snp_id)),
+  overlap_rows           = c(nrow(overlap_cases), nrow(overlap_controls))
+)
+kable(overlap_summary, caption = "mQTL x metQTL overlap summary")
+```
+
+### Longitudinal category breakdown among overlapping SNPs
+
+```{r category-breakdown}
+cat_cases <- overlap_cases %>% distinct(snp_id, category) %>% count(category) %>% mutate(group = "Cases")
+cat_controls <- overlap_controls %>% distinct(snp_id, category) %>% count(category) %>% mutate(group = "Controls")
+bind_rows(cat_cases, cat_controls) %>%
+  pivot_wider(names_from = group, values_from = n, values_fill = 0) %>%
+  kable(caption = "Longitudinal classification of SNPs shared with metQTL hits")
+```
+
+### Dynamic mQTLs (cases): metQTL overlap status
+
+The overlap above is an *inner join* — it only shows hits that overlapped a
+metQTL, so a longitudinally "dynamic" mQTL with no metabolite signal would be
+invisible by construction. To see all dynamic hits regardless of metQTL
+status, we take the classified longitudinal results (cases) as the **left**
+table and left-join the metQTL significant set, keeping every dynamic hit
+whether or not it matched.
+
+```{r dynamic-metqtl-status}
+cases_classified_full <- read_csv("../PPMI_LONG/longitudinal_mqtl_cases_classified.csv",
+                                   col_types = cols(pair_id = col_character(), snp_id = col_character(),
+                                                     cpg_id = col_character(), status = col_character(),
+                                                     warnings = col_character(), category = col_character(),
+                                                     same_sign_as_meta = col_logical(), replicated = col_logical(),
+                                                     dynamic = col_logical(), .default = col_double()),
+                                   guess_max = Inf)
+
+dynamic_hits <- cases_classified_full %>%
+  filter(category == "replicated_and_dynamic") %>%
+  left_join(metqtl_cases_sig %>% select(SNP, gene, `p-value`, FDR),
+            by = c("snp_id" = "SNP"), relationship = "many-to-many") %>%
+  rename(metabolite_feature = gene, metqtl_pval = `p-value`, metqtl_fdr = FDR) %>%
+  mutate(has_metqtl_match = !is.na(metabolite_feature))
+
+kable(dynamic_hits %>%
+        select(snp_id, cpg_id, main_beta, main_fdr, interaction_p, interaction_fdr,
+               has_metqtl_match, metabolite_feature, metqtl_fdr),
+      caption = "All 'replicated_and_dynamic' case mQTLs, with metQTL match status (left join — unmatched rows show NA)")
+
+no_metqtl <- dynamic_hits %>% filter(!has_metqtl_match)
+cat("Dynamic mQTLs (cases) with NO metQTL overlap:", n_distinct(no_metqtl$snp_id), "\n")
+```
+
+```{r dynamic-no-overlap-table}
+kable(no_metqtl %>% select(snp_id, cpg_id, main_beta, main_fdr, interaction_p, interaction_fdr),
+      caption = "Dynamic mQTLs (cases) with no corresponding metabolite QTL signal")
+```
+
+---
+
+## Step 3: Gene annotation via Ensembl REST API
+
+```{r annotate-snps, cache=TRUE}
+unique_snps <- union(overlap_cases$snp_id, overlap_controls$snp_id)
+
+WINDOW <- 250000
+BASE_URL <- "https://rest.ensembl.org"
+
+annotate_snp <- function(snp_id) {
+  parts <- strsplit(snp_id, ":")[[1]]
+  chr <- parts[1]
+  pos <- as.integer(parts[2])
+
+  query_region <- function(start, end) {
+    url <- sprintf("%s/overlap/region/human/%s:%d-%d?feature=gene;content-type=application/json",
+                    BASE_URL, chr, start, end)
+    resp <- tryCatch(GET(url), error = function(e) NULL)
+    if (is.null(resp) || status_code(resp) != 200) return(NULL)
+    fromJSON(content(resp, as = "text", encoding = "UTF-8"), flatten = TRUE)
+  }
+
+  hit <- query_region(pos, pos)
+  Sys.sleep(0.1)
+
+  if (!is.null(hit) && length(hit) > 0 && is.data.frame(hit) && nrow(hit) > 0) {
+    gene_labels <- ifelse(is.na(hit$external_name) | hit$external_name == "",
+                           hit$id, hit$external_name)
+    genes <- unique(gene_labels)
+    return(tibble(snp_id = snp_id, gene = paste(genes, collapse = ";"),
+                   relationship = "overlapping", distance_bp = 0))
+  }
+
+  hit_wide <- query_region(max(1, pos - WINDOW), pos + WINDOW)
+  Sys.sleep(0.1)
+
+  if (is.null(hit_wide) || length(hit_wide) == 0 || !is.data.frame(hit_wide) || nrow(hit_wide) == 0) {
+    return(tibble(snp_id = snp_id, gene = NA_character_,
+                   relationship = paste0("none_within_", WINDOW, "bp"), distance_bp = NA_integer_))
+  }
+
+  hit_wide <- hit_wide %>%
+    mutate(dist = pmax(0, pmax(start - pos, pos - end)),
+           gene_label = ifelse(is.na(external_name) | external_name == "", id, external_name))
+
+  nearest <- hit_wide %>% slice_min(dist, n = 1, with_ties = FALSE)
+
+  tibble(snp_id = snp_id, gene = nearest$gene_label,
+         relationship = "nearest", distance_bp = nearest$dist)
+}
+
+annotations <- map_dfr(unique_snps, function(s) {
+  tryCatch(annotate_snp(s), error = function(e) {
+    tibble(snp_id = s, gene = NA_character_, relationship = "query_failed", distance_bp = NA_integer_)
+  })
+})
+
+write_csv(annotations, "overlap_snp_gene_annotations.csv")
+
+overlap_cases_annot <- overlap_cases %>%
+  left_join(annotations, by = "snp_id") %>%
+  rename(nearest_gene = gene, gene_relationship = relationship, gene_distance_bp = distance_bp)
+
+overlap_controls_annot <- overlap_controls %>%
+  left_join(annotations, by = "snp_id") %>%
+  rename(nearest_gene = gene, gene_relationship = relationship, gene_distance_bp = distance_bp)
+
+write_csv(overlap_cases_annot, "mqtl_metqtl_overlap_cases_annotated.csv")
+write_csv(overlap_controls_annot, "mqtl_metqtl_overlap_controls_annotated.csv")
+```
+
+### Annotation outcome
+
+```{r annotation-outcome}
+kable(as.data.frame(table(relationship = annotations$relationship)),
+      caption = "SNP -> gene annotation outcome (overlapping gene body, nearest within 250kb, or none found)")
+```
+
+### Genes implicated, cases
+
+```{r genes-cases}
+genes_cases <- overlap_cases_annot %>%
+  distinct(snp_id, nearest_gene) %>%
+  filter(!is.na(nearest_gene), nearest_gene != "") %>%
+  count(nearest_gene, sort = TRUE)
+
+kable(genes_cases, caption = "Unique genes implicated by shared SNPs — Cases")
+```
+
+### Genes implicated, controls
+
+```{r genes-controls}
+genes_controls <- overlap_controls_annot %>%
+  distinct(snp_id, nearest_gene) %>%
+  filter(!is.na(nearest_gene), nearest_gene != "") %>%
+  count(nearest_gene, sort = TRUE)
+
+kable(genes_controls, caption = "Unique genes implicated by shared SNPs — Controls")
+```
+
+### Gene frequency, top hits
+
+```{r gene-plot, fig.width=9, fig.height=5}
+top_genes <- bind_rows(
+  genes_cases %>% mutate(group = "Cases"),
+  genes_controls %>% mutate(group = "Controls")
+) %>%
+  group_by(group) %>%
+  slice_max(n, n = 10) %>%
+  ungroup()
+
+ggplot(top_genes, aes(x = reorder(nearest_gene, n), y = n, fill = group)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  facet_wrap(~group, scales = "free") +
+  labs(x = NULL, y = "Number of shared SNPs",
+       title = "Top genes implicated by mQTL x metQTL overlap SNPs") +
+  theme_minimal(base_size = 12)
+```
+
+---
+
+## Step 4: Overlap with Nalls et al. PD GWAS loci
+
+Using the curated Nalls et al. (2019) locus table (Table S2) — already
+restricted to genome-wide significant, LD-independent lead SNPs — rather than
+the looser nominal-significance (p<0.05) SNP list, since the latter would
+flag a large fraction of any SNP set as a "GWAS hit" by chance alone.
+
+Because these are independent lead SNPs from a clumping procedure, they are
+unlikely to be the exact variant present in the PPMI/PEG genotype panel. We
+therefore use a **window-based match (±250kb)** rather than requiring
+identical `chr:pos` — the same logic used for the Ensembl gene-annotation
+step above. This window is a judgment call; tighten or loosen
+`GWAS_WINDOW` below as appropriate.
+
+```{r load-nalls, cache=TRUE}
+GWAS_WINDOW <- 250000   # bp; matches the Ensembl gene-annotation window
+
+nalls_raw <- read_tsv("../external/Nalls_GWAS/PDNallsP005_TableS2.csv",
+                       col_types = cols(.default = col_character()), guess_max = Inf)
+
+qtl_gene_col   <- grep("QTL_Nominated_Gene", names(nalls_raw), value = TRUE)[1]
+p_all_col      <- grep("^P_all_studies$", names(nalls_raw), value = TRUE)[1]
+locus_num_col  <- grep("Locus_Number", names(nalls_raw), value = TRUE)[1]
+
+nalls <- nalls_raw %>%
+  transmute(
+    nalls_snp     = SNP,
+    CHR           = as.integer(CHR),
+    BP            = as.integer(gsub(",", "", BP)),
+    nearest_gene  = Nearest_Gene,
+    qtl_gene      = .data[[qtl_gene_col]],
+    p_all_studies = as.numeric(.data[[p_all_col]]),
+    locus_number  = as.integer(.data[[locus_num_col]])
+  )
+
+stopifnot("Nalls BP parsing failed" = sum(is.na(nalls$BP)) == 0)
+stopifnot("Nalls CHR parsing failed" = sum(is.na(nalls$CHR)) == 0)
+
+cat("Nalls loci loaded:", nrow(nalls), "\n")
+```
+
+```{r match-gwas, cache=TRUE}
+cases_meta <- read_csv("../PPMI_LONG/longitudinal_mqtl_cases_classified.csv",
+                        col_types = cols(pair_id = col_character(), snp_id = col_character(),
+                                          cpg_id = col_character(), status = col_character(),
+                                          warnings = col_character(), category = col_character(),
+                                          same_sign_as_meta = col_logical(), replicated = col_logical(),
+                                          dynamic = col_logical(), .default = col_double()),
+                        guess_max = Inf)
+
+case_snps <- cases_meta %>%
+  distinct(snp_id) %>%
+  mutate(chr = str_extract(snp_id, "^[^:]+"),
+         pos = as.integer(str_extract(snp_id, "(?<=:)[0-9]+")))
+
+match_gwas <- function(chr, pos) {
+  cand <- nalls %>% filter(as.character(CHR) == chr)
+  if (nrow(cand) == 0) {
+    return(tibble(is_gwas_hit = FALSE, gwas_dist_bp = NA_integer_,
+                   gwas_nearest_gene = NA_character_, gwas_locus_number = NA_integer_))
+  }
+  dists <- abs(cand$BP - pos)
+  i <- which.min(dists)
+  tibble(is_gwas_hit = dists[i] <= GWAS_WINDOW, gwas_dist_bp = dists[i],
+         gwas_nearest_gene = cand$nearest_gene[i], gwas_locus_number = cand$locus_number[i])
+}
+
+gwas_matches <- case_snps %>%
+  mutate(m = pmap(list(chr, pos), match_gwas)) %>%
+  unnest(m)
+
+cat("Unique case-hit SNPs tested against Nalls loci:", nrow(gwas_matches), "\n")
+cat("Within", GWAS_WINDOW/1000, "kb of a known PD GWAS locus:", sum(gwas_matches$is_gwas_hit), "\n")
+```
+
+### GWAS-adjacent case hits
+
+```{r gwas-hit-table}
+gwas_hits_table <- gwas_matches %>%
+  filter(is_gwas_hit) %>%
+  arrange(gwas_dist_bp) %>%
+  select(snp_id, gwas_nearest_gene, gwas_locus_number, gwas_dist_bp)
+
+kable(gwas_hits_table, caption = "Case mQTL SNPs within 250kb of a known Nalls et al. PD GWAS locus")
+```
+
+---
+
+## Step 5: Union table — cases supported by metQTL, GWAS, or both
+
+```{r union-table, cache=TRUE}
+metqtl_snp_set <- unique(metqtl_cases_sig$SNP)
+
+union_table <- cases_meta %>%
+  mutate(in_metqtl = snp_id %in% metqtl_snp_set) %>%
+  left_join(gwas_matches %>% select(snp_id, is_gwas_hit, gwas_dist_bp,
+                                     gwas_nearest_gene, gwas_locus_number),
+            by = "snp_id") %>%
+  rename(in_gwas = is_gwas_hit) %>%
+  left_join(overlap_cases %>% distinct(snp_id, metabolite_feature),
+            by = "snp_id", relationship = "many-to-many") %>%
+  # Union criteria: metQTL support, GWAS proximity, OR longitudinal dynamic
+  # classification — a dynamic hit is of interest in its own right even
+  # without external metQTL/GWAS support, per the earlier left-join finding
+  # that 2 dynamic case hits had no metQTL overlap.
+  mutate(union_hit = in_metqtl | in_gwas | dynamic) %>%
+  filter(union_hit)
+
+write_csv(union_table, "cases_union_metqtl_or_gwas.csv")
+
+cat("Total case pairs in union (metQTL, GWAS, and/or dynamic):", nrow(union_table), "\n")
+cat("Unique SNPs in union:", n_distinct(union_table$snp_id), "\n")
+cat("  - metQTL only:            ", n_distinct(union_table$snp_id[union_table$in_metqtl & !union_table$in_gwas & !union_table$dynamic]), "\n")
+cat("  - GWAS only:              ", n_distinct(union_table$snp_id[!union_table$in_metqtl & union_table$in_gwas & !union_table$dynamic]), "\n")
+cat("  - Dynamic only (neither):  ", n_distinct(union_table$snp_id[!union_table$in_metqtl & !union_table$in_gwas & union_table$dynamic]), "\n")
+cat("  - metQTL + GWAS:          ", n_distinct(union_table$snp_id[union_table$in_metqtl & union_table$in_gwas & !union_table$dynamic]), "\n")
+cat("  - Any combo incl. dynamic:", n_distinct(union_table$snp_id[union_table$dynamic & (union_table$in_metqtl | union_table$in_gwas)]), "\n")
+```
+
+```{r union-summary-table}
+union_table %>%
+  distinct(snp_id, cpg_id, category, in_metqtl, in_gwas, dynamic,
+           metabolite_feature, gwas_nearest_gene, gwas_dist_bp) %>%
+  arrange(desc(dynamic), desc(in_metqtl & in_gwas)) %>%
+  kable(caption = "Case meta-hits supported by metQTL overlap, GWAS proximity, and/or longitudinal dynamic classification")
+```
+
+---
+
+## Step 6: Metabolite compound annotation (xmsannotator)
+
+No collaborator compound-ID mapping table for the overlap metabolite
+features ever materialized, so this step resolves them independently:
+mass/retention-time matching (10ppm, ±30s) against the HMDB, KEGG, and
+LipidMaps reference databases via
+[xmsannotator](https://github.com/kuppal2/xmsannotator), run separately per
+platform (`c18`/`hilic`) and database in
+`annotate_overlap_metabolites_xmsannotator.R`. `c18`/`LipidMaps` did not
+finish that run (only 2 initial DB matches, stopped short of a compound
+call); the other 5 platform/db combinations completed. `rerun_step3_matching.R`
+re-derives the consolidated match tables read in below from that run's
+on-disk output without re-running the (expensive) annotation itself.
+
+```{r metabolite-annotation, cache=TRUE}
+best_annotation <- read_csv("overlap_metabolite_best_annotation.csv", show_col_types = FALSE) %>%
+  select(metabolite_feature, annotated_compound, confidence, score, source)
+
+n_any_match  <- n_distinct(best_annotation$metabolite_feature)
+named_match  <- best_annotation %>% filter(confidence == 2, !annotated_compound %in% c("", "-"))
+
+cat("Overlap metabolite features with any mz/rt match:      ", n_any_match, "/ 33\n")
+cat("Overlap metabolite features with a high-confidence,\n",
+    "named compound match:                                 ", nrow(named_match), "/ 33\n")
+
+overlap_cases_compounds <- overlap_cases_annot %>%
+  left_join(best_annotation, by = "metabolite_feature")
+
+overlap_controls_compounds <- overlap_controls_annot %>%
+  left_join(best_annotation, by = "metabolite_feature")
+
+union_table <- union_table %>%
+  left_join(best_annotation, by = "metabolite_feature")
+
+write_csv(overlap_cases_compounds, "mqtl_metqtl_overlap_cases_annotated_compounds.csv")
+write_csv(overlap_controls_compounds, "mqtl_metqtl_overlap_controls_annotated_compounds.csv")
+write_csv(union_table, "cases_union_metqtl_or_gwas.csv")
+```
+
+### Annotated compounds
+
+A `confidence` of 2 / `score` of 100000 marks xmsannotator's high-confidence
+named calls; `confidence` 0 entries are a raw mass/RT hit only (frequently
+without a resolvable compound name) and are not treated as identifications
+below.
+
+```{r metabolite-annotation-table}
+named_match %>%
+  arrange(source, metabolite_feature) %>%
+  select(metabolite_feature, annotated_compound, source) %>%
+  kable(caption = "High-confidence (confidence = 2) compound matches for overlap metabolite features")
+```
+
+- The **GPX5/GPX6** metabolite feature (`C18_mz_rt_351.997_25.714`) got **no
+  match** in either c18 table — it remains unresolved, so the
+  glutathione/redox-pathway hypothesis raised earlier is still unconfirmed.
+- The **ERLIN1** SNP's metabolite features fared better: two of its four
+  associated features resolve to high-confidence matches, **N6-Methyl-L-lysine**
+  and **Valyl-Valine** — both amino-acid derivatives, consistent with
+  ERLIN1's role in ER lipid/protein handling but not a slam-dunk pathway
+  link on their own.
+- The **RUNX1** metabolite feature (`C18_mz_rt_709.527_218.804`) got no match.
+- These are still single mass/RT hits within a fairly loose tolerance
+  (10ppm/30s), not MS/MS-confirmed identities — treat names here as leads
+  for literature/pathway follow-up, not confirmed compound IDs.
+- The GWAS overlap (Step 4/5) is currently **cases only**, per the original
+  request — extending the same window-match logic to the controls-side
+  classified results is a straightforward addition if useful later.
+- The `union_table` combines metQTL support, GWAS proximity, and longitudinal
+  dynamic classification at the SNP level; a hit can qualify through any one
+  criterion independently, and "any combo incl. dynamic" is the strongest
+  converging evidence in this analysis — a locus independently implicated by
+  PD genetic risk, metabolomics, methylation, and a time-varying genetic
+  effect.
+- The 2 `replicated_and_dynamic` case-level hits are now included in the
+  union table regardless of metQTL/GWAS support (Step 5), and are shown
+  explicitly in Step 2's dynamic-status table whether or not they overlap a
+  metQTL.
+- Full output files (`*_combined_fdr.csv`, `*_sig_fdr05.csv`,
+  `mqtl_metqtl_overlap_*_annotated.csv`, `overlap_snp_gene_annotations.csv`,
+  `cases_union_metqtl_or_gwas.csv`, `mqtl_metqtl_overlap_*_annotated_compounds.csv`)
+  are written alongside this report for downstream use. The `*_annotated.csv`
+  files (Step 3) stay gene-annotation-only, since they're also the input
+  contract for `annotate_overlap_metabolites_xmsannotator.R` /
+  `rerun_step3_matching.R`; the compound annotations from Step 6 are joined
+  into separate `*_annotated_compounds.csv` files and into
+  `cases_union_metqtl_or_gwas.csv` instead, to avoid changing that contract.
