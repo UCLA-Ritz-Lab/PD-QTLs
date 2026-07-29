@@ -57,7 +57,13 @@ if (!"ID" %in% colnames(pvar_raw)) {
 
 pvar <- pvar_raw %>%
   select(snp_id=ID, chr=`#CHROM`, pos=POS) %>%
-  mutate(chr=as.character(chr))
+  mutate(
+    chr    = as.character(chr),
+    # Strip :REF:ALT suffix so snp_id matches the geno_tsv format
+    # produced by reformat_traw.awk (which also strips alleles).
+    # e.g. 1:693731:A:G -> 1:693731
+    snp_id = sub(":[ACGT]+:[ACGT]+$", "", snp_id)
+  )
 
 cat(sprintf("SNPs: %d\n", nrow(pvar)))
 cat(sprintf("Example SNP IDs: %s\n", paste(head(pvar$snp_id, 3), collapse=", ")))

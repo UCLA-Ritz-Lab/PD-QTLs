@@ -186,10 +186,8 @@ tmp_geno   <- tempfile(fileext=".tsv.gz")
 tmp_snpids <- tempfile(fileext=".txt")
 on.exit(unlink(c(tmp_meth, tmp_covar, tmp_geno, tmp_snpids)), add=TRUE)
 
-write.table(meth_aligned,  tmp_meth,  sep="\t", quote=FALSE)
-write.table(covar_aligned, tmp_covar, sep="\t", quote=FALSE)
-# Note: meth_aligned freed after column count assertion below; covar_aligned freed now
-rm(covar_aligned); gc()
+# Note: meth_aligned and covar_aligned written to temp files AFTER
+# reconciliation with geno sample order (see below)
 
 writeLines(snp_pos$snp_id, tmp_snpids)
 cat(sprintf("[%s] Pre-filtering geno_tsv to %d MAF-filtered SNPs...\n",
@@ -245,9 +243,53 @@ n_geno_cols <- as.integer(system(
   intern=TRUE))
 cat(sprintf("[%s] Geno_tsv: %d SNPs x %d samples\n",
             Sys.time(), n_filtered, n_geno_cols))
-cat(sprintf("Meth aligned:  %d samples\n", ncol(meth_aligned)))
-stopifnot(n_geno_cols == ncol(meth_aligned))
-rm(meth_aligned); gc()
+cat(sprintf("Meth aligned before reconciliation: %d samples\n", ncol(meth_aligned)))
+
+# ── Final reconciliation: ensure meth/geno/covar have identical sample order ──
+# --mind may remove a sample from the pgen after prepare_datasets ran,
+# leaving geno_tsv with fewer samples than meth_aligned, causing misalignment.
+geno_final_hdr <- strsplit(
+  system(paste("zcat", tmp_geno_aligned, "| head -1"), intern=TRUE),
+  "\t")[[1]][-1]
+geno_final_patnos <- as.character(
+  id_map$PATNO[match(geno_final_hdr, id_map$plink_iid)])
+cat(sprintf("Geno final PATNOs: %d\n", length(geno_final_patnos)))
+
+# Restrict meth and covar to samples present in geno, in geno order
+common_final <- intersect(geno_final_patnos, colnames(meth_aligned))
+cat(sprintf("Common samples: %d\n", length(common_final)))
+
+if (length(common_final) == 0)
+  stop("No common samples after reconciliation")
+
+if (length(common_final) < length(geno_final_patnos)) {
+  cat(sprintf("Dropping %d geno samples not in meth\n",
+      length(geno_final_patnos) - length(common_final)))
+}
+
+# Reorder to match geno column order exactly
+geno_order    <- geno_final_patnos[geno_final_patnos %in% common_final]
+meth_aligned  <- meth_aligned[,  geno_order, drop=FALSE]
+covar_aligned <- covar_aligned[, geno_order, drop=FALSE]
+
+cat(sprintf("Final sample count — geno: %d  meth: %d  covar: %d\n",
+    length(geno_final_patnos), ncol(meth_aligned), ncol(covar_aligned)))
+stopifnot(ncol(meth_aligned) == ncol(covar_aligned))
+
+# Write to temp files now that order is confirmed correct
+write.table(meth_aligned,  tmp_meth,  sep="\t", quote=FALSE)
+write.table(covar_aligned, tmp_covar, sep="\t", quote=FALSE)
+rm(meth_aligned, covar_aligned); gc()
+
+# Per-dataset MAF filter now handled upstream by --export-allele in
+# export_genotypes. Decompress geno to plain text — SlicedData$LoadFile
+# cannot reliably seek within bgzipped files for multi-slice reading.
+tmp_geno_txt <- tempfile(fileext=".txt")
+on.exit(unlink(tmp_geno_txt), add=TRUE)
+if (system(paste("zcat", tmp_geno_aligned, ">", tmp_geno_txt)) != 0)
+  stop("Failed to decompress tmp_geno_aligned to plain text")
+tmp_geno_maf <- tmp_geno_txt
+
 
 # ── Build MatrixEQTL SlicedData objects ───────────────────────────────────────
 snp_data   <- SlicedData$new()
@@ -259,7 +301,7 @@ snp_data$fileOmitCharacters <- "NA"
 snp_data$fileSkipRows       <- 1
 snp_data$fileSkipColumns    <- 1
 snp_data$fileSliceSize      <- 500
-snp_data$LoadFile(tmp_geno_aligned)
+snp_data$LoadFile(tmp_geno_maf)
 
 meth_data$fileDelimiter      <- "\t"
 meth_data$fileOmitCharacters <- "NA"
@@ -288,6 +330,60 @@ genepos_df <- cpg_pos %>%
 
 cat(sprintf("SNP positions for MatrixEQTL: %d\n", nrow(snpspos_df)))
 cat(sprintf("CpG positions for MatrixEQTL: %d\n", nrow(genepos_df)))
+
+# ── Pre-MatrixEQTL sanity checks ──────────────────────────────────────────────
+cat("\n--- Sanity checks ---\n")
+
+# Check 1: column counts match across all three matrices
+n_geno_check <- as.integer(system(
+  paste("head -1", tmp_geno_maf, "| awk '{print NF-1}'"),
+  intern=TRUE))
+n_meth_check <- as.integer(system(
+  paste("head -1", tmp_meth, "| awk '{print NF-1}'"), intern=TRUE))
+n_covar_check <- as.integer(system(
+  paste("head -1", tmp_covar, "| awk '{print NF-1}'"), intern=TRUE))
+cat(sprintf("Column counts — geno: %d  meth: %d  covar: %d\n",
+    n_geno_check, n_meth_check, n_covar_check))
+if (!all(c(n_geno_check, n_meth_check, n_covar_check) == n_geno_check))
+  warning("MISMATCH in column counts — matrices will be misaligned!")
+
+# Check 2: sample order matches between geno and meth temp files
+geno_hdr <- strsplit(
+  system(paste("head -1", tmp_geno_maf), intern=TRUE), "\t")[[1]][-1]
+meth_hdr <- strsplit(
+  system(paste("head -1", tmp_meth), intern=TRUE), "\t")[[1]][-1]
+cat(sprintf("Geno samples (first 3): %s\n", paste(head(geno_hdr, 3), collapse=", ")))
+cat(sprintf("Meth samples (first 3): %s\n", paste(head(meth_hdr, 3), collapse=", ")))
+# Geno has plink_iid format, meth has PATNO format — check via id_map
+geno_patnos <- id_map$PATNO[match(geno_hdr, id_map$plink_iid)]
+cat(sprintf("Geno->PATNO (first 3): %s\n",
+    paste(head(geno_patnos, 3), collapse=", ")))
+cat(sprintf("Sample order identical (via id_map): %s\n",
+    all(as.character(geno_patnos) == meth_hdr, na.rm=TRUE)))
+
+# Check 3: duplicates in tmp_geno_maf (post-MAF-filter)
+n_dup_aligned <- as.integer(system(
+  paste("awk 'NR>1{print $1}'", tmp_geno_maf, "| sort | uniq -d | wc -l"),
+  intern=TRUE))
+cat(sprintf("Duplicate SNPs in tmp_geno_maf: %d\n", n_dup_aligned))
+
+# Check 4: dosage range in tmp_geno_maf
+n_dose_out <- as.integer(system(paste0(
+  "awk 'NR>1{for(i=2;i<=NF;i++){v=$i+0;",
+  " if(v<-0.01||v>2.01)c++}} END{print c+0}'"),
+  intern=TRUE))
+cat(sprintf("Dosage values outside [0,2]: %d\n", n_dose_out))
+
+# Check 5: near-zero variance CpGs in tmp_meth
+cat("Near-constant CpGs (sd < 0.005) — top 5:\n")
+system(paste0(
+  "awk 'NR>1{n=NF-1; s=0; s2=0; ",
+  "for(i=2;i<=NF;i++){s+=$i; s2+=$i*$i} ",
+  "mean=s/n; var=s2/n-mean*mean; ",
+  "if(var>=0 && sqrt(var)<0.005) print $1, sqrt(var)}' ",
+  tmp_meth, " | head -5"))
+
+cat("--- End sanity checks ---\n\n")
 
 cat(sprintf("[%s] Memory before MatrixEQTL: %.1f MB\n",
     Sys.time(), sum(gc()[,2]) * 8 / 1024))

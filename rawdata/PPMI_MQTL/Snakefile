@@ -31,7 +31,8 @@ rule all:
         expand("{out}/mqtl/{dataset}/cis_mqtls.txt",
                out=OUT, dataset=DATASETS),
         expand("{out}/mqtl/{dataset}/trans_mqtls.txt",
-               out=OUT, dataset=DATASETS)
+               out=OUT, dataset=DATASETS),
+        f"{OUT}/positions/export_allele.txt"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -120,7 +121,7 @@ rule extract_positions:
             --maf     {config[plink][maf]} \
             --max-alleles 2 \
             --snps-only \
-            --set-missing-var-ids '@:#:$r:$a' \
+            --set-all-var-ids '@:#:$r:$a' \
             --new-id-max-allele-len 50 missing \
             --make-just-pvar \
             --out     {OUT}/positions/reference \
@@ -160,11 +161,11 @@ rule subset_genotypes:
         set -euo pipefail
         mkdir -p {OUT}/genotypes
 
-        # --maf and --geno are NOT applied here — both were applied at
-        # extract_positions using the full 894-sample cohort.
-        # Re-applying in small per-dataset subsamples (e.g. 65 controls)
-        # is far too strict: --geno 0.05 removes 4.5M variants in 65 samples.
-        # Only --mind and --hwe are applied per-dataset.
+        # --maf and --geno applied at extract_positions on full 894-sample cohort.
+        # Only --mind and --hwe applied per-dataset to avoid over-filtering
+        # in small subsamples. Allele orientation is fixed by --export-allele
+        # in export_genotypes using a cohort-wide frequency file, ensuring
+        # consistent allele coding across cases, controls, and cohorts.
         plink2 \
             --pfile   {params.in_prefix} \
             --keep    {input.keep_file} \
@@ -173,12 +174,83 @@ rule subset_genotypes:
             --hwe     {config[plink][hwe]} \
             --max-alleles 2 \
             --snps-only \
-            --set-missing-var-ids '@:#:$r:$a' \
+            --set-all-var-ids '@:#:$r:$a' \
             --new-id-max-allele-len 50 missing \
             --make-pgen \
             --out     {params.out_prefix} \
             --threads {threads} \
         2> {log}
+        """
+
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 3b: Compute cohort-wide allele frequencies
+# Used to select the most frequent ALT allele at multiallelic sites for
+# --export-allele, ensuring consistent allele coding across all datasets
+# (cases, controls) and across cohorts (PPMI, PEG) for meta-analysis.
+# Must use the full .variant2 cohort, not per-dataset subsamples.
+# ──────────────────────────────────────────────────────────────────────────────
+rule allele_frequencies:
+    input:
+        psam     = config["data"]["plink_prefix"] + ".psam",
+        keep_all = f"{OUT}/positions/all_variant2.keep"
+    output:
+        afreq    = f"{OUT}/positions/cohort_allele_freq.afreq",
+        export_allele = f"{OUT}/positions/export_allele.txt"
+    conda:
+        "envs/tools.yaml"
+    threads:
+        config["resources"]["threads_plink"]
+    log:
+        f"{OUT}/logs/allele_frequencies.log"
+    shell:
+        """
+        set -euo pipefail
+
+        # Compute allele frequencies on full .variant2 cohort.
+        # --set-all-var-ids forces unique chr:pos:ref:alt IDs so that
+        # multiallelic sites produce separate entries in the afreq file.
+        plink2 \
+            --pfile {config[data][plink_prefix]} \
+            --keep  {input.keep_all} \
+            --set-all-var-ids '@:#:$r:$a' \
+            --new-id-max-allele-len 50 missing \
+            --freq \
+            --out   {OUT}/positions/cohort_allele_freq \
+            --threads {threads} \
+        2> {log}
+
+        # Build --export-allele file: for each chr:pos position, find the
+        # ALT allele with the highest cohort-wide frequency.
+        # All variant IDs at that position (e.g. chr:pos:ref:altA and
+        # chr:pos:ref:altB) are mapped to the same best allele, so
+        # --export-allele outputs consistent dosage across all datasets.
+        # Format: two columns, full pvar ID and the allele to count.
+        awk 'NR>1 {{
+            id=$2; alt=$4; freq=$5
+            # Extract chr:pos key from full chr:pos:ref:alt ID
+            split(id, parts, ":")
+            chrpos = parts[1]":"parts[2]
+
+            # Track highest-freq ALT per chr:pos position
+            if (!(chrpos in best) || freq > best_freq[chrpos]) {{
+                best[chrpos] = alt
+                best_freq[chrpos] = freq
+            }}
+            # Store all full variant IDs at this position
+            ids[id] = chrpos
+        }}
+        END {{
+            # Output full chr:pos:ref:alt ID with best ALT at that position.
+            # PLINK2 --export-allele matches on the full pvar ID, not chr:pos.
+            for (id in ids) {{
+                chrpos = ids[id]
+                print id"	"best[chrpos]
+            }}
+        }}' {output.afreq} > {output.export_allele}
+
+        echo "Export allele file: $(wc -l < {output.export_allele}) variants" >> {log}
         """
 
 
@@ -188,9 +260,10 @@ rule subset_genotypes:
 # ──────────────────────────────────────────────────────────────────────────────
 rule export_genotypes:
     input:
-        pgen = f"{OUT}/genotypes/{{dataset}}.pgen",
-        psam = f"{OUT}/genotypes/{{dataset}}.psam",
-        pvar = f"{OUT}/genotypes/{{dataset}}.pvar"
+        pgen         = f"{OUT}/genotypes/{{dataset}}.pgen",
+        psam         = f"{OUT}/genotypes/{{dataset}}.psam",
+        pvar         = f"{OUT}/genotypes/{{dataset}}.pvar",
+        export_allele = f"{OUT}/positions/export_allele.txt"
     output:
         tsv = f"{OUT}/genotypes/{{dataset}}.geno.tsv.gz"
     conda:
@@ -205,14 +278,24 @@ rule export_genotypes:
         """
         set -euo pipefail
 
+        # --export-allele specifies which allele to count at each variant.
+        # Using cohort-wide frequencies ensures consistent orientation
+        # across cases, controls, and between PPMI and PEG cohorts.
         plink2 \
-            --pfile   {params.prefix} \
-            --export  Av \
-            --out     {params.prefix} \
-            --threads {threads} \
+            --pfile          {params.prefix} \
+            --export         Av \
+            --export-allele  {input.export_allele} \
+            --out            {params.prefix} \
+            --threads        {threads} \
         2> {log}
 
-        awk -f scripts/reformat_traw.awk {params.prefix}.traw | bgzip -c > {output.tsv}
+        # --maj-ref in subset_genotypes ensures the major allele in this
+        # subsample is always REF, so the counted ALT allele is always the
+        # minor allele. Deduplication is still applied as a safety measure
+        # in case any chr:pos collisions remain after --max-alleles 2.
+        awk -f scripts/reformat_traw.awk {params.prefix}.traw | \
+            awk 'NR==1{{print; next}} !seen[$1]++{{print}}' | \
+            bgzip -c > {output.tsv}
 
         rm -f {params.prefix}.traw
         n_snps=$(zcat {output.tsv} | tail -n +2 | wc -l)

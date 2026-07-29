@@ -10,6 +10,10 @@ NR==1 {
 }
 NR>1 {
     id = $2
+    # Strip allele suffix in either format:
+    #   chr:pos:REF:ALT  (from --set-all-var-ids '@:#:$r:$a')
+    #   chr:pos_ALT      (legacy plink1 format)
+    sub(/:[ACGT]+:[ACGT]+$/, "", id)
     sub(/_[ACGT]+$/, "", id)
     printf "%s", id
     for (i=7; i<=NF; i++) printf "\t%s", $i
