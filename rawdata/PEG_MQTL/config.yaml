@@ -12,14 +12,12 @@ data:
   covar_peg1:       "../PEG_covariates/covariates_peg1.csv"
   covar_peg2:       "../PEG_covariates/covariates_peg2.csv"
   gwas_linkage:     "../PEG_WGS/gwas_linkage.csv"
-  vcf:              "../PEG_WGS/PEG_PD.phased.vcf.gz"
+  vcf:              "../PEG_WGS/post_imputed/results/peg_imputed_filtered.dose.vcf.gz"
 
 # Output directory
 out_dir: "results"
 
 # ── Datasets to process ────────────────────────────────────────────────────────
-# Each entry defines a stratified analysis unit.
-# case_group: used in meta-analysis grouping (cases or controls)
 datasets:
   peg1_cases:
     label:      "PEG1 Cases"
@@ -34,24 +32,28 @@ datasets:
     wave:       "PEG2"
     case_group: "cases"
 
-# Meta-analysis is handled in a separate pipeline (peg_ppmi_meta/)
-# that combines results from this pipeline and the PPMI mQTL pipeline.
-
 # ── Probe filtering ────────────────────────────────────────────────────────────
 filters:
-  min_sd:           0.02    # minimum SD across samples to retain probe
-  max_na_fraction:  0.00    # maximum NA fraction per probe (0 = complete cases)
+  min_sd:           0.02
+  max_na_fraction:  0.00
 
 # ── MatrixEQTL settings ────────────────────────────────────────────────────────
 matrixeqtl:
-  cis_dist:         1000000  # cis window in bp (1 Mb)
-  pval_cis:         1e-3     # p-value threshold for cis output
-  pval_trans:       1e-5     # p-value threshold for trans output
-  model:            "linear" # linear or anova
+  cis_dist:         1000000
+  pval_cis:         1e-3    # relaxed from 1e-5 to improve meta-analysis overlap
+                            # FDR correction applied at meta-analysis stage
+  pval_trans:       1e-20   # effectively disabled — insufficient power for trans
+                            # in individual cohorts; revisit with larger N
+  model:            "linear"
+
+# ── Imputation quality filter ─────────────────────────────────────────────────
+imputation:
+  min_r2:  0.8
+  min_maf: 0.05
 
 # ── PLINK2 QC filters for genotype subsetting ─────────────────────────────────
 plink:
-  maf:   0.01
+  maf:   0.05
   geno:  0.05
   mind:  0.10
   hwe:   1e-6

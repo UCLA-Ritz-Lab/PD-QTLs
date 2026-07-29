@@ -3,18 +3,19 @@
 # PEG1 + PEG2 methylation + genotypes → stratified mQTLs → meta-analysis
 #
 # Steps:
-#   1. prepare_datasets   — load methylation, match IDs, filter probes
-#   2. extract_positions  — SNP and CpG positions for MatrixEQTL
-#   3. subset_genotypes   — PLINK2 --keep per dataset
-#   4. export_genotypes   — PLINK2 additive dosage export
-#   5. run_mqtl           — MatrixEQTL cis + trans per dataset
-#   6. meta_analysis      — METAL for cases and controls separately
+#   1. filter_imputed     — bcftools MAF >= 0.05 + Rsq >= 0.8 pre-filter
+#   2. prepare_datasets   — load methylation, match IDs, filter probes
+#   3. extract_positions  — SNP and CpG positions for MatrixEQTL
+#   4. subset_genotypes   — PLINK2 --keep per dataset
+#   5. export_genotypes   — PLINK2 SNP-major dosage export (avoids fread OOM)
+#   6. run_mqtl           — MatrixEQTL cis + trans per dataset
 # ──────────────────────────────────────────────────────────────────────────────
 
 configfile: "config.yaml"
 
-OUT      = config["out_dir"]
-DATASETS = list(config["datasets"].keys())
+OUT          = config["out_dir"]
+DATASETS     = list(config["datasets"].keys())
+FILTERED_VCF = f"{OUT}/genotypes/peg_imputed_maf05_rsq08.vcf.gz"
 # ──────────────────────────────────────────────────────────────────────────────
 rule all:
     input:
@@ -25,8 +26,49 @@ rule all:
                out=OUT, dataset=DATASETS)
 
 
+
 # ──────────────────────────────────────────────────────────────────────────────
-# Step 1: Prepare datasets
+# Step 1: Pre-filter imputed VCF by Rsq and MAF
+# Reduces ~25M imputed variants to ~8-10M well-imputed common variants,
+# making downstream PLINK2 and MatrixEQTL steps tractable on a workstation.
+# MAF >= 0.05 and Rsq >= 0.8 are standard thresholds for mQTL analysis.
+# ──────────────────────────────────────────────────────────────────────────────
+rule filter_imputed:
+    input:
+        vcf = config["data"]["vcf"]
+    output:
+        vcf = FILTERED_VCF,
+        tbi = f"{FILTERED_VCF}.tbi"
+    params:
+        min_r2  = config["imputation"]["min_r2"],
+        min_maf = config["imputation"]["min_maf"]
+    conda:
+        "envs/tools.yaml"
+    log:
+        f"{OUT}/logs/filter_imputed.log"
+    shell:
+        """
+        set -euo pipefail
+        mkdir -p {OUT}/genotypes
+
+        echo "Filtering imputed VCF: Rsq >= {params.min_r2}, MAF >= {params.min_maf}" 2> {log}
+
+        bcftools view \
+            --include 'INFO/R2 >= {params.min_r2} && INFO/MAF >= {params.min_maf}' \
+            --output-type z \
+            --output {output.vcf} \
+            {input.vcf} \
+        2>> {log}
+
+        tabix -p vcf {output.vcf} 2>> {log}
+
+        n=$(bcftools stats {output.vcf} | grep "^SN.*number of SNPs" | cut -f4)
+        echo "Variants retained: $n" >> {log}
+        """
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 2: Prepare datasets
 # One R script processes all datasets at once (all share the same
 # methylation data load — splitting would reload large RData files 3x)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -39,7 +81,7 @@ rule prepare_datasets:
         covar_peg1       = config["data"]["covar_peg1"],
         covar_peg2       = config["data"]["covar_peg2"],
         gwas_linkage     = config["data"]["gwas_linkage"],
-        vcf              = config["data"]["vcf"]
+        vcf              = FILTERED_VCF
     output:
         probe_list = f"{OUT}/datasets/retained_probes.txt",
         # Per-dataset outputs declared as a group
@@ -77,14 +119,14 @@ rule prepare_datasets:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Step 2: Extract SNP and CpG positions
+# Step 3: Extract SNP and CpG positions
 # Needs a QC-filtered .pvar from any dataset — use peg1_cases as reference
 # ──────────────────────────────────────────────────────────────────────────────
 rule extract_positions:
     input:
         keep_file  = f"{OUT}/datasets/peg1_cases/geno_keep.txt",
         probe_list = f"{OUT}/datasets/retained_probes.txt",
-        vcf        = config["data"]["vcf"]
+        vcf        = FILTERED_VCF
     output:
         snp_pos = f"{OUT}/positions/snp_positions.csv",
         cpg_pos = f"{OUT}/positions/cpg_positions.csv",
@@ -101,7 +143,7 @@ rule extract_positions:
 
         # Generate a reference .pvar from the full VCF with QC filters
         plink2 \
-            --vcf   {input.vcf} \
+            --vcf   {input.vcf} dosage=DS \
             --keep  {input.keep_file} \
             --maf   {config[plink][maf]} \
             --geno  {config[plink][geno]} \
@@ -127,11 +169,11 @@ rule extract_positions:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Step 3: Subset genotypes per dataset (PLINK2 --keep)
+# Step 4: Subset genotypes per dataset (PLINK2 --keep)
 # ──────────────────────────────────────────────────────────────────────────────
 rule subset_genotypes:
     input:
-        vcf       = config["data"]["vcf"],
+        vcf       = FILTERED_VCF,
         keep_file = f"{OUT}/datasets/{{dataset}}/geno_keep.txt"
     output:
         pgen = f"{OUT}/genotypes/{{dataset}}.pgen",
@@ -150,7 +192,7 @@ rule subset_genotypes:
         set -euo pipefail
 
         plink2 \
-            --vcf  {input.vcf} \
+            --vcf  {input.vcf} dosage=DS \
             --keep {input.keep_file} \
             --maf  {config[plink][maf]} \
             --geno {config[plink][geno]} \
@@ -169,7 +211,10 @@ rule subset_genotypes:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Step 4: Export additive genotype dosage for MatrixEQTL
+# Step 5: Export genotypes in SNP-major format for MatrixEQTL
+# --export Av writes SNPs as rows, samples as columns -- no in-R transpose.
+# This avoids the segfault from fread + t() on a 5GB sample-major .raw file.
+# Output .geno.tsv.gz is loaded directly by SlicedData$LoadFile in run_mqtl.R.
 # ──────────────────────────────────────────────────────────────────────────────
 rule export_genotypes:
     input:
@@ -177,33 +222,43 @@ rule export_genotypes:
         psam = f"{OUT}/genotypes/{{dataset}}.psam",
         pvar = f"{OUT}/genotypes/{{dataset}}.pvar"
     output:
-        raw = f"{OUT}/genotypes/{{dataset}}.raw"
+        tsv = f"{OUT}/genotypes/{{dataset}}.geno.tsv.gz"
     conda:
         "envs/tools.yaml"
     threads:
         config["resources"]["threads_plink"]
     params:
-        in_prefix  = f"{OUT}/genotypes/{{dataset}}",
-        out_prefix = f"{OUT}/genotypes/{{dataset}}"
+        prefix = f"{OUT}/genotypes/{{dataset}}"
     log:
         f"{OUT}/logs/export_genotypes/{{dataset}}.log"
     shell:
         """
+        set -euo pipefail
+
+        # Export variant-major additive dosage (SNPs x samples)
+        # .traw columns: CHR SNP CM POS COUNTED ALT sample1 sample2 ...
         plink2 \
-            --pfile {params.in_prefix} \
-            --export A \
-            --out    {params.out_prefix} \
+            --pfile   {params.prefix} \
+            --export  Av \
+            --out     {params.prefix} \
             --threads {threads} \
         2> {log}
+
+        # Reformat .traw to MatrixEQTL SNP-major TSV via external awk script
+        # (avoids quoting/escape issues with inline awk in Snakemake shell blocks)
+        awk -f scripts/reformat_traw.awk {params.prefix}.traw | bgzip -c > {output.tsv}
+
+        rm -f {params.prefix}.traw
+        echo "SNPs exported: $(zcat {output.tsv} | tail -n +2 | wc -l)" >> {log}
         """
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Step 5: Run MatrixEQTL per dataset
+# Step 6: Run MatrixEQTL per dataset
 # ──────────────────────────────────────────────────────────────────────────────
 rule run_mqtl:
     input:
-        raw        = f"{OUT}/genotypes/{{dataset}}.raw",
+        tsv        = f"{OUT}/genotypes/{{dataset}}.geno.tsv.gz",
         meth_file  = f"{OUT}/datasets/{{dataset}}/methylation.csv.gz",
         covar_file = f"{OUT}/datasets/{{dataset}}/covariates.csv",
         id_map     = f"{OUT}/datasets/{{dataset}}/id_map.csv",
@@ -216,8 +271,6 @@ rule run_mqtl:
         "envs/r_mqtl.yaml"
     threads:
         config["resources"]["threads_r"]
-    params:
-        geno_prefix = f"{OUT}/genotypes/{{dataset}}"
     log:
         f"{OUT}/logs/mqtl/{{dataset}}.log"
     shell:
@@ -226,7 +279,7 @@ rule run_mqtl:
 
         Rscript scripts/run_mqtl.R \
             --dataset     {wildcards.dataset} \
-            --geno_prefix {params.geno_prefix} \
+            --geno_tsv    {input.tsv} \
             --meth_file   {input.meth_file} \
             --covar_file  {input.covar_file} \
             --id_map      {input.id_map} \
