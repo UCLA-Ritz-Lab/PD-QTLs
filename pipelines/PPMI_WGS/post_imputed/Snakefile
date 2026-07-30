@@ -2,7 +2,7 @@
 # PPMI WGS Post-Imputation Pipeline
 # Michigan Imputation Server output → filtered VCF → PLINK2 pfiles
 #
-# Input:  Downloads/chr_<N>.zip  (MIS output, one per chromosome)
+# Input:  results/PPMI_WGS/imputation_results/chr_<N>.zip  (MIS output, one per chromosome)
 # Output: results/ppmi_imputed_filtered.dose.vcf.gz
 #         results/ppmi_imputed.pgen / .psam / .pvar
 #         results/qc/post_imputation_report.txt
@@ -24,7 +24,7 @@
 
 import os
 
-DOWNLOADS   = "../../../Downloads/PPMI_WGS/post_imputed"
+DOWNLOADS   = "../../../results/PPMI_WGS/imputation_results"
 OUT         = "../../../results/PPMI_WGS/post_imputed"
 CHROMS      = list(range(1, 23))
 RSQ_MIN     = 0.3

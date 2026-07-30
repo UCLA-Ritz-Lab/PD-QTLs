@@ -1,7 +1,7 @@
 import re
 
 sexdict={}
-with open("covariates/Demographics_14Dec2025.csv","r") as file:
+with open("../../../Downloads/PPMI_covariates/Demographics_14Dec2025.csv","r") as file:
     header = file.readline()
     #print(f"{header}")
     pattern=r'"(\d+)"'
@@ -22,8 +22,8 @@ with open("covariates/Demographics_14Dec2025.csv","r") as file:
         #print(f"Adding {sex} to {patno}")
 
 
-with open("../../../Downloads/PPMI_WGS/pre_imputed/contig_1.psam","r") as file:
-    with open("../../../Downloads/PPMI_WGS/pre_imputed/all.psam","w") as out:
+with open("../../../Downloads/PPMI_WGS/contig_1.psam","r") as file:
+    with open("../../../results/PPMI_WGS/pre_imputed/all.psam","w") as out:
         header = file.readline().strip()
         pattern=r'PPMISI(\d+).variant2'
         out.write(f"{header}\n")

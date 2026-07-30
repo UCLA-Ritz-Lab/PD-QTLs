@@ -107,7 +107,7 @@ the UCSC hg19 reference.
 Edit `config.yaml` to match your environment:
 
 ```yaml
-vcf_dir:   "../../../Downloads/PPMI_WGS/pre_imputed"  # directory containing per-sample VCFs
+vcf_dir:   "../../../Downloads/PPMI_WGS"  # directory containing per-chromosome VCFs (from AMP-PD)
 out_dir:   "../../../results/PPMI_WGS/pre_imputed"    # all outputs go here
 ref_fasta: "../../../Downloads/PPMI_WGS/resources/hg19.fa"  # path to hs37d5 reference
 ```

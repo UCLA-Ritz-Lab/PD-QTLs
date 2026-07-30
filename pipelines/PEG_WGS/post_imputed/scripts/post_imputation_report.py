@@ -27,7 +27,7 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--info_dir",  required=True, help="Directory containing chr{N}.info.gz")
     p.add_argument("--final_vcf", required=True, help="Merged filtered VCF")
-    p.add_argument("--mis_qc",    default="../../../Downloads/PEG_WGS/post_imputed/qc_report.txt", help="MIS qc_report.txt path")
+    p.add_argument("--mis_qc",    default="../../../results/PEG_WGS/imputation_results/qc_report.txt", help="MIS qc_report.txt path")
     p.add_argument("--rsq_min",     type=float, default=0.3)
     p.add_argument("--out",       required=True, help="Output report path")
     return p.parse_args()

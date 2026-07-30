@@ -5,7 +5,7 @@
 
 # Directory containing per-sample VCF files
 # File naming: PPMISI{SAMPLE_ID}.realigned.recalibrated.g.genotyped.filtered.annotated.vcf.gz
-vcf_dir: "../../../Downloads/PPMI_WGS/pre_imputed"
+vcf_dir: "../../../Downloads/PPMI_WGS"
 
 # Output directory
 out_dir: "../../../results/PPMI_WGS/pre_imputed"

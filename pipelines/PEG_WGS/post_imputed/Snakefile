@@ -2,7 +2,7 @@
 # PEG Post-Imputation Pipeline
 # Michigan Imputation Server — HRC r1.1 2016 (GRCh37/hg19)
 #
-# Input:  imputed/chr_<N>.zip  (one per chromosome, from MIS download)
+# Input:  results/PEG_WGS/imputation_results/chr_<N>.zip  (one per chromosome, from MIS download)
 # Output: results/peg_imputed_filtered.dose.vcf.gz  (analysis-ready dosages)
 #         results/peg_imputed_filtered.dose.vcf.gz.tbi
 #         results/peg_imputed.pgen / .psam / .pvar  (PLINK2 dosage format)
@@ -20,7 +20,7 @@
 # ── Config ────────────────────────────────────────────────────────────────────
 import os
 
-IMPUTED_DIR = "../../../Downloads/PEG_WGS/post_imputed"     # directory containing chr_<N>.zip files from MIS
+IMPUTED_DIR = "../../../results/PEG_WGS/imputation_results"     # directory containing chr_<N>.zip files from MIS
 OUT         = "../../../results/PEG_WGS/post_imputed"
 CHROMS      = list(range(1, 23))
 
@@ -220,7 +220,7 @@ rule convert_plink2:
 rule qc_report:
     input:
         info_files = expand(f"{OUT}/unzipped/chr{{chrom}}.info.gz", chrom=CHROMS),
-        mis_qc     = "../../../Downloads/PEG_WGS/post_imputed/qc_report.txt",
+        mis_qc     = "../../../results/PEG_WGS/imputation_results/qc_report.txt",
         final_vcf  = f"{OUT}/peg_imputed_filtered.dose.vcf.gz"
     output:
         report = f"{OUT}/qc/post_imputation_report.txt"

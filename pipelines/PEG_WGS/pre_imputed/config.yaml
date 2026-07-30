@@ -6,7 +6,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 
 # Input VCF
-vcf: "../../../Downloads/PEG_WGS/pre_imputed/PEG_PD.phased.vcf.gz"
+vcf: "../../../Downloads/PEG_WGS/PEG_PD.phased.vcf.gz"
 
 # Output directory
 out_dir: "../../../results/PEG_WGS/pre_imputed"
