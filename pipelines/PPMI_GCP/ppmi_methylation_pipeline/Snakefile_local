@@ -1,0 +1,385 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# PPMI EPIC v2 Methylation Pipeline
+# IDATs → QC → SeSAMe Normalization → Beta Matrix
+#
+# Steps:
+#   1. collect_sample_sheets  — parse and validate all per-batch sample sheets
+#   2. normalize_batch        — SeSAMe NOOB + pOOBAH per Sentrix batch
+#   3. convert_rds_to_csv     — convert R RDS beta matrices to CSV for Python
+#   4. combine_betas          — intersect probes, merge into final matrix
+#   5. deconvolve_celltypes   — EpiDISH blood cell-type deconvolution
+#   6. qc_report              — summary report across all batches
+# ──────────────────────────────────────────────────────────────────────────────
+
+import os
+import glob
+import re
+
+configfile: "config.yaml"
+
+IDAT_DIR = config["idat_dir"]
+OUT      = config["out_dir"]
+
+# ── Discover Sentrix batch IDs from subdirectory names ────────────────────────
+def get_sentrix_ids():
+    pattern = os.path.join(IDAT_DIR, "*", "sample_sheet.csv")
+    sheets  = glob.glob(pattern)
+    if not sheets:
+        raise ValueError(
+            f"No sample_sheet.csv files found under {IDAT_DIR}/*/\n"
+            "Check that config['idat_dir'] is correct."
+        )
+    ids = sorted([
+        os.path.basename(os.path.dirname(s))
+        for s in sheets
+    ])
+    return ids
+
+SENTRIX_IDS = get_sentrix_ids()
+print(f"Found {len(SENTRIX_IDS)} Sentrix batches.")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# rule all
+# ──────────────────────────────────────────────────────────────────────────────
+rule all:
+    input:
+        # Final combined beta matrix
+        f"{OUT}/final/beta_matrix.csv.gz",
+
+        # Cell-type proportions
+        f"{OUT}/final/cell_type_proportions.csv",
+        # QC report
+        f"{OUT}/final/qc_report.txt",
+        # Probe list
+        f"{OUT}/final/retained_probes.txt"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 1: Validate per-batch sample sheets and check IDAT file presence
+# ──────────────────────────────────────────────────────────────────────────────
+rule validate_sample_sheet:
+    input:
+        sheet = f"{IDAT_DIR}/{{sentrix_id}}/sample_sheet.csv"
+    output:
+        validated = f"{OUT}/validated/{{sentrix_id}}.validated.txt"
+    run:
+        import pandas as pd
+
+        sheet = pd.read_csv(input.sheet)
+
+        # Check required columns
+        required_cols = ["Sample_Name", "Sentrix_ID",
+                         "Sentrix_Position", "Sample_Group"]
+        missing_cols = [c for c in required_cols if c not in sheet.columns]
+        if missing_cols:
+            raise ValueError(
+                f"Batch {wildcards.sentrix_id}: missing columns "
+                f"{missing_cols} in sample_sheet.csv"
+            )
+
+        # Check IDAT files exist
+        issues = []
+        for _, row in sheet.iterrows():
+            sid = str(row["Sentrix_ID"])
+            pos = str(row["Sentrix_Position"])
+            prefix = os.path.join(
+                IDAT_DIR, wildcards.sentrix_id,
+                f"{sid}_{pos}"
+            )
+            for channel in ["Red", "Grn"]:
+                idat = f"{prefix}_{channel}.idat"
+                if not os.path.exists(idat):
+                    issues.append(f"Missing: {idat}")
+
+        with open(output.validated, "w") as fh:
+            fh.write(f"Batch: {wildcards.sentrix_id}\n")
+            fh.write(f"Samples: {len(sheet)}\n")
+            if issues:
+                fh.write(f"WARNINGS ({len(issues)}):\n")
+                fh.write("\n".join(issues) + "\n")
+            else:
+                fh.write("All IDAT files present.\n")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 2: SeSAMe normalization per Sentrix batch
+#   - NOOB background correction + dye-bias normalisation
+#   - pOOBAH detection p-value masking
+#   - Probe filtering (sex, cross-reactive, SNP-confounded)
+#   - Output: probe x sample beta matrix as RDS
+# ──────────────────────────────────────────────────────────────────────────────
+rule normalize_batch:
+    input:
+        validated = f"{OUT}/validated/{{sentrix_id}}.validated.txt",
+        sheet     = f"{IDAT_DIR}/{{sentrix_id}}/sample_sheet.csv"
+    output:
+        betas = f"{OUT}/betas/{{sentrix_id}}.betas.rds",
+        qc    = f"{OUT}/qc/{{sentrix_id}}.qc.csv",
+        ss    = f"{OUT}/sample_sheets/{{sentrix_id}}.parsed.csv"
+    conda:
+        "envs/sesame.yaml"
+    threads:
+        config["resources"]["threads_r"]
+    log:
+        f"{OUT}/logs/normalize/{{sentrix_id}}.log"
+    shell:
+        """
+        # Set thread limits at OS level before R starts — the C-level
+        # threading libraries in SeSAMe/BLAS read these at load time,
+        # before any R code runs, so Sys.setenv() inside R is too late.
+        export OMP_NUM_THREADS=1
+        export OPENBLAS_NUM_THREADS=1
+        export MKL_NUM_THREADS=1
+        export VECLIB_MAXIMUM_THREADS=1
+        export NUMEXPR_NUM_THREADS=1
+        export BLAS_NUM_THREADS=1
+
+        # Raise open file limit — SeSAMe opens multiple file handles per
+        # IDAT pair; the default limit of 1024 causes pthread_create to
+        # fail with error 22 (EINVAL) when file descriptors are exhausted
+        ulimit -n 65536 2>/dev/null || true
+        ulimit -u unlimited 2>/dev/null || true
+
+        Rscript scripts/process_batch.R \
+            --sentrix_id     {wildcards.sentrix_id} \
+            --idat_dir       {IDAT_DIR} \
+            --out_dir        {OUT} \
+            --array_type     {config[sesame][array_type]} \
+            --pval_threshold {config[sesame][pval_threshold]} \
+            --min_sample_rate {config[sesame][min_sample_detection_rate]} \
+            --min_probe_rate  {config[sesame][min_probe_detection_rate]} \
+            --remove_sex     {config[filters][remove_sex_probes]} \
+            --remove_cr      {config[filters][remove_cross_reactive]} \
+            --remove_snp     {config[filters][remove_snp_probes]} \
+            --normalization  {config[sesame][normalization]} \
+            --log            {log} \
+        2>> {log}
+        """
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 3: Convert per-batch RDS beta matrices to CSV for Python
+#   - R RDS files can't be read directly by Python
+#   - Simple conversion script keeps the pipeline tool-agnostic
+# ──────────────────────────────────────────────────────────────────────────────
+rule convert_rds_to_csv:
+    input:
+        rds = f"{OUT}/betas/{{sentrix_id}}.betas.rds"
+    output:
+        csv = f"{OUT}/betas/{{sentrix_id}}.betas.csv.gz"
+    conda:
+        "envs/sesame.yaml"
+    threads: 1
+    log:
+        f"{OUT}/logs/convert/{{sentrix_id}}.log"
+    params:
+        rscript = f"{OUT}/betas/{{sentrix_id}}_convert.R"
+    run:
+        # Write R script to file — heredoc syntax fails in Snakemake shell blocks
+        rscript_content = f"""
+mat <- readRDS("{input.rds}")
+df  <- as.data.frame(mat)
+df  <- cbind(probe_id = rownames(df), df)
+write.csv(df, gzfile("{output.csv}"),
+          row.names = FALSE, quote = FALSE)
+cat(sprintf("Converted %d probes x %d samples\\n",
+            nrow(mat), ncol(mat)))
+"""
+        with open(params.rscript, "w") as fh:
+            fh.write(rscript_content)
+        shell(f"Rscript {{params.rscript}} 2> {{log}} && rm -f {{params.rscript}}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 4: Combine all batch beta matrices into final probe x sample matrix
+#   - Intersects probes across batches
+#   - Removes duplicate samples (keeps higher detection rate)
+#   - Applies final cross-batch NA filter
+#   - Outputs .csv.gz
+# ──────────────────────────────────────────────────────────────────────────────
+rule combine_betas:
+    input:
+        csvs = expand(
+            f"{OUT}/betas/{{sentrix_id}}.betas.csv.gz",
+            sentrix_id=SENTRIX_IDS
+        ),
+        qcs  = expand(
+            f"{OUT}/qc/{{sentrix_id}}.qc.csv",
+            sentrix_id=SENTRIX_IDS
+        )
+    output:
+        matrix  = f"{OUT}/final/beta_matrix.csv.gz",
+        qc      = f"{OUT}/final/qc_combined.csv",
+        probes  = f"{OUT}/final/retained_probes.txt"
+    conda:
+        "envs/pymath.yaml"
+    threads:
+        config["resources"]["threads_combine"]
+    log:
+        f"{OUT}/logs/combine/combine_betas.log"
+    shell:
+        """
+        python scripts/combine_betas.py \
+            --betas_dir   {OUT}/betas \
+            --qc_dir      {OUT}/qc \
+            --out_matrix  {output.matrix} \
+            --out_qc      {output.qc} \
+            --out_probes  {output.probes} \
+            --min_probe_detection {config[sesame][min_probe_detection_rate]} \
+            --log         {log}
+        """
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 5: EpiDISH blood cell-type deconvolution
+#   - Runs on the final combined beta matrix
+#   - Outputs cell-type proportion matrix (samples x cell types)
+#   - Used as covariates in the mQTL RMarkdown
+# ──────────────────────────────────────────────────────────────────────────────
+rule deconvolve_celltypes:
+    input:
+        matrix = f"{OUT}/final/beta_matrix.csv.gz",
+        probes = f"{OUT}/final/retained_probes.txt"
+    output:
+        props  = f"{OUT}/final/cell_type_proportions.csv"
+    conda:
+        "envs/sesame.yaml"
+    threads:
+        config["resources"]["threads_r"]
+    log:
+        f"{OUT}/logs/deconvolve/epidish.log"
+    params:
+        rscript = f"{OUT}/final/deconvolve_celltypes.R"
+    run:
+        rscript_content = f"""
+suppressPackageStartupMessages({{
+  library(EpiDISH)
+  library(data.table)
+  library(tidyverse)
+}})
+
+cat("Loading combined beta matrix...\\n")
+# The first column is an unnamed probe ID index (pandas to_csv default)
+beta <- fread("{input.matrix}", data.table = FALSE)
+rownames(beta) <- beta[[1]]
+beta <- as.matrix(beta[, -1])
+
+cat(sprintf("Beta matrix: %d probes x %d samples\\n",
+            nrow(beta), ncol(beta)))
+
+data(centDHSbloodDMC.m)
+
+common_probes <- intersect(rownames(beta), rownames(centDHSbloodDMC.m))
+cat(sprintf("Reference probes matched: %d\\n", length(common_probes)))
+
+cat("Running EpiDISH RPC deconvolution...\\n")
+epi_res <- epidish(
+  beta.m = beta[common_probes, ],
+  ref.m  = centDHSbloodDMC.m[common_probes, ],
+  method = "{config['deconvolution']['method']}"
+)
+
+cell_props <- as.data.frame(epi_res$estF)
+cell_props$sample_col_name <- rownames(cell_props)
+
+write_csv(cell_props, "{output.props}")
+cat(sprintf("Cell-type proportions written for %d samples\\n",
+            nrow(cell_props)))
+"""
+        import os
+        os.makedirs(os.path.dirname(params.rscript), exist_ok=True)
+        with open(params.rscript, "w") as fh:
+            fh.write(rscript_content)
+        shell(f"Rscript {{params.rscript}} 2> {{log}} && rm -f {{params.rscript}}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 6: QC report
+#   - Summarises per-batch and overall QC metrics
+#   - Flags batches and samples with unusual metrics
+# ──────────────────────────────────────────────────────────────────────────────
+rule qc_report:
+    input:
+        qc_combined = f"{OUT}/final/qc_combined.csv",
+        cell_props  = f"{OUT}/final/cell_type_proportions.csv",
+        matrix      = f"{OUT}/final/beta_matrix.csv.gz",
+        probes      = f"{OUT}/final/retained_probes.txt"
+    output:
+        report = f"{OUT}/final/qc_report.txt"
+    conda:
+        "envs/pymath.yaml"
+    threads: 1
+    log:
+        f"{OUT}/logs/qc/qc_report.log"
+    run:
+        import pandas as pd
+        import numpy as np
+
+        qc  = pd.read_csv(input.qc_combined)
+        cp  = pd.read_csv(input.cell_props)
+
+        with open(output.report, "w") as fh:
+            def w(line=""):
+                fh.write(line + "\n")
+
+            w("=" * 60)
+            w("PPMI EPIC v2 Methylation Pipeline — QC Report")
+            w("=" * 60)
+            w()
+
+            # Overall sample summary
+            w("--- Sample Summary ---")
+            w(f"Total samples processed:  {len(qc)}")
+            w(f"Samples passing QC:       {qc['pass_qc'].sum()}")
+            w(f"Samples failing QC:       {(~qc['pass_qc']).sum()}")
+            w(f"Overall pass rate:        "
+              f"{100*qc['pass_qc'].mean():.1f}%")
+            w()
+
+            # Detection rate distribution
+            w("--- Detection Rate Distribution (passing samples) ---")
+            dr = qc[qc["pass_qc"]]["detection_rate"]
+            w(f"  Min:    {dr.min():.4f}")
+            w(f"  Median: {dr.median():.4f}")
+            w(f"  Mean:   {dr.mean():.4f}")
+            w(f"  Max:    {dr.max():.4f}")
+            w()
+
+            # Visit distribution
+            w("--- Samples per Visit (passing) ---")
+            passing = qc[qc["pass_qc"]].copy()
+            if "visit_code" in passing.columns:
+                for v, n in (passing["visit_code"]
+                             .value_counts()
+                             .sort_index()
+                             .items()):
+                    w(f"  {v}: {n} samples")
+            w()
+
+            # Failing samples
+            failing = qc[~qc["pass_qc"]]
+            if len(failing) > 0:
+                w("--- Failing Samples ---")
+                for _, row in failing.iterrows():
+                    w(f"  {row.get('sample_col_name', 'unknown')}: "
+                      f"{row.get('fail_reason', 'unknown reason')}")
+            else:
+                w("--- Failing Samples ---")
+                w("  None.")
+            w()
+
+            # Probe summary
+            with open(input.probes) as pf:
+                n_probes = sum(1 for _ in pf)
+            w("--- Probe Summary ---")
+            w(f"  Probes retained in final matrix: {n_probes:,}")
+            w()
+
+            # Cell type summary
+            w("--- Cell-Type Proportions (mean across samples) ---")
+            cell_cols = [c for c in cp.columns if c != "sample_col_name"]
+            for col in cell_cols:
+                w(f"  {col}: {cp[col].mean():.3f} "
+                  f"(sd={cp[col].std():.3f})")
+            w()
+            w("=" * 60)

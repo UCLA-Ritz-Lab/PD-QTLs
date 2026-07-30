@@ -1,0 +1,394 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# PPMI WGS Pre-Imputation Pipeline
+# per-sample VCFs → merged VCF → per-chromosome VCFs ready for MIS upload
+# Reference genome: GRCh37 / hg19
+#
+# Steps:
+#   1. index_vcf              — index each input VCF with tabix
+#   2. normalize_vcf          — decompose multiallelics, left-align, apply GQ/DP filters
+#   3. merge_vcfs             — merge all normalised VCFs into one multi-sample VCF
+#   4. filter_merged          — site-level missingness filter on merged VCF
+#   5. split_by_chrom         — split merged VCF into per-chromosome VCFs
+#   6. prepare_for_imputation — site QC + MIS-compatible VCF per chromosome
+#
+# Post-imputation steps (PLINK2 conversion etc.) live in ../post_imputed/Snakefile
+# ──────────────────────────────────────────────────────────────────────────────
+
+import os
+import glob
+import re
+from pathlib import Path
+
+configfile: "config.yaml"
+
+# ── Discover sample IDs from VCF filenames ────────────────────────────────────
+VCF_PATTERN = os.path.join(
+    config["vcf_dir"],
+    "PPMISI*.realigned.recalibrated.g.genotyped.filtered.annotated.vcf.gz"
+)
+
+def get_sample_ids():
+    vcf_files = glob.glob(VCF_PATTERN)
+    if not vcf_files:
+        raise ValueError(
+            f"No VCF files found matching pattern:\n  {VCF_PATTERN}\n"
+            "Check that config['vcf_dir'] is correct."
+        )
+    ids = []
+    for f in vcf_files:
+        m = re.search(r"PPMISI(\w+)\.realigned", os.path.basename(f))
+        if m:
+            ids.append(m.group(1))
+    return sorted(ids)
+
+SAMPLES = get_sample_ids()
+CHROMS  = config["chromosomes"]
+OUT     = config["out_dir"]
+
+print(f"Found {len(SAMPLES)} samples.")
+print(f"Processing {len(CHROMS)} chromosomes (GRCh37/hg19 naming).")
+
+# ── Helper: input VCF path for a given sample ─────────────────────────────────
+def sample_vcf(sample_id):
+    return os.path.join(
+        config["vcf_dir"],
+        f"PPMISI{sample_id}.realigned.recalibrated.g.genotyped.filtered.annotated.vcf.gz"
+    )
+
+# ──────────────────────────────────────────────────────────────────────────────
+# rule all — declare final outputs
+# ──────────────────────────────────────────────────────────────────────────────
+rule all:
+    input:
+        # Per-chromosome VCFs ready for MIS upload
+        expand("{out}/for_imputation/{chrom}.vcf.gz",
+               out=OUT, chrom=CHROMS),
+        expand("{out}/for_imputation/{chrom}.vcf.gz.tbi",
+               out=OUT, chrom=CHROMS),
+        # Pre-imputation QC report
+        f"{OUT}/qc/pre_imputation_report.txt",
+        # Merged annotated VCF (useful to keep)
+        f"{OUT}/merged/merged.filtered.vcf.gz",
+        f"{OUT}/merged/merged.filtered.vcf.gz.tbi",
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 1: Index input VCFs (tabix)
+# Required before bcftools merge
+# ──────────────────────────────────────────────────────────────────────────────
+rule index_vcf:
+    # Snakemake does not allow lambda functions in output blocks.
+    # Workaround: write a sentinel file to track completion; the real
+    # .tbi lands next to the source VCF (in Downloads/) via params.
+    input:
+        vcf = lambda wc: sample_vcf(wc.sample)
+    output:
+        sentinel = f"{OUT}/index_sentinel/{{sample}}.done"
+    params:
+        src_vcf = lambda wc: sample_vcf(wc.sample)
+    conda:
+        "envs/bcftools.yaml"
+    threads: 1
+    log:
+        f"{OUT}/logs/index/{{sample}}.log"
+    shell:
+        """
+        tabix -p vcf {params.src_vcf} 2> {log}
+        touch {output.sentinel}
+        """
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 2: Normalise per-sample VCFs
+#   - decompose multiallelic sites into biallelic records
+#   - left-align indels against GRCh37 reference
+#   - hard-filter on genotype quality (GQ) and depth (DP)
+#   - keep only PASS variants
+#   - keep only SNPs and indels (exclude symbolic alleles)
+# ──────────────────────────────────────────────────────────────────────────────
+rule normalize_vcf:
+    # PPMI VCFs contain annotation tags that violate the VCF spec:
+    #   - INFO tags missing from the header (dbSNP138_ID, dbSNP142_ID, etc.)
+    #   - Tag names starting with a digit (1000G_phase1_release_v3_AF)
+    # bcftools norm chokes on both. Fix: strip all INFO and FORMAT annotations
+    # except the genotype fields we actually need (GT, GQ, DP, AD, PL).
+    # This is safe — annotation fields are irrelevant for mQTL genotyping.
+    input:
+        vcf      = lambda wc: sample_vcf(wc.sample),
+        sentinel = f"{OUT}/index_sentinel/{{sample}}.done",
+        ref      = config["ref_fasta"]
+    output:
+        vcf = f"{OUT}/normalised/{{sample}}.norm.vcf.gz",
+        tbi = f"{OUT}/normalised/{{sample}}.norm.vcf.gz.tbi"
+    conda:
+        "envs/bcftools.yaml"
+    threads:
+        config["resources"]["threads_bcftools"]
+    params:
+        min_gq = config["filters"]["min_gq"],
+        min_dp = config["filters"]["min_dp"]
+    log:
+        f"{OUT}/logs/normalize/{{sample}}.log"
+    shell:
+        """
+        # Strip malformed INFO tags first using annotate -x, before any other
+        # bcftools command attempts to parse them. The PPMI VCFs contain tags
+        # that are absent from the header and tag names starting with digits
+        # (e.g. 1000G_phase1_release_v3_AF) which violate the VCF spec.
+        # bcftools annotate with --no-version reads the raw stream without
+        # validating INFO tags, then removes them cleanly before downstream steps.
+        # --output-type v (plain text VCF) is required here specifically.
+        # BCF binary output (-O u) triggers strict header tag validation
+        # even when those tags are being removed, causing bcf_write to fail
+        # on the malformed PPMI annotation tags. Plain text VCF output bypasses
+        # that BCF validation. Downstream steps revert to -O u as normal.
+        # Use pipefail so any failed step in the pipe is caught immediately
+        set -euo pipefail
+
+        bcftools annotate \
+            --remove INFO,^FORMAT/GT,FORMAT/GQ,FORMAT/DP,FORMAT/AD,FORMAT/PL \
+            --force \
+            --output-type v \
+            {input.vcf} \
+            2>> {log} \
+        | bcftools view \
+            --apply-filters PASS \
+            --type snps,indels \
+            --targets 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22 \
+            --output-type u \
+            2>> {log} \
+        | bcftools norm \
+            --multiallelics -both \
+            --fasta-ref {input.ref} \
+            --check-ref w \
+            --output-type u \
+            2>> {log} \
+        | bcftools filter \
+            --include 'FORMAT/GQ >= {params.min_gq} && FORMAT/DP >= {params.min_dp}' \
+            --soft-filter LowQual \
+            --output-type u \
+            2>> {log} \
+        | bcftools view \
+            --apply-filters PASS \
+            --output-type z \
+            --output {output.vcf} \
+            2>> {log}
+
+        # Validate output is a non-empty valid bgzipped VCF before tabix
+        if [[ ! -s {output.vcf} ]]; then
+            echo "ERROR: {output.vcf} is empty after normalisation" >> {log}
+            exit 1
+        fi
+
+        tabix -f -p vcf {output.vcf} 2>> {log}
+        """
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 3: Merge all normalised per-sample VCFs into a single multi-sample VCF
+#   - uses bcftools merge
+#   - missing genotypes coded as ./.
+#   - VCF paths written to a file to avoid shell arg-length limits (500+ samples)
+# ──────────────────────────────────────────────────────────────────────────────
+rule merge_vcfs:
+    input:
+        vcfs = expand(
+            f"{OUT}/normalised/{{sample}}.norm.vcf.gz",
+            sample=SAMPLES
+        ),
+        tbis = expand(
+            f"{OUT}/normalised/{{sample}}.norm.vcf.gz.tbi",
+            sample=SAMPLES
+        )
+    output:
+        vcf      = f"{OUT}/merged/merged.vcf.gz",
+        tbi      = f"{OUT}/merged/merged.vcf.gz.tbi",
+        vcf_list = f"{OUT}/merged/vcf_list.txt"
+    conda:
+        "envs/bcftools.yaml"
+    threads:
+        config["resources"]["threads_merge"]
+    resources:
+        mem_gb = config["resources"]["mem_gb_merge"]
+    log:
+        f"{OUT}/logs/merge/merge.log"
+    run:
+        # Write list of VCFs — avoids shell arg-length limit with 500+ files
+        with open(output.vcf_list, "w") as fh:
+            fh.write("\n".join(input.vcfs) + "\n")
+
+        shell(
+            """
+            bcftools merge \
+                --file-list {output.vcf_list} \
+                --merge none \
+                --missing-to-ref \
+                --output-type z \
+                --threads {threads} \
+                --output {output.vcf} \
+            2> {log}
+
+            tabix -p vcf {output.vcf} 2>> {log}
+            """
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 4: Site-level missingness filter on merged VCF
+#   - remove sites where > max_missing fraction of samples have missing GT
+#   - separating this from PLINK2 QC makes it easier to diagnose filter losses
+# ──────────────────────────────────────────────────────────────────────────────
+rule filter_merged:
+    input:
+        vcf = f"{OUT}/merged/merged.vcf.gz",
+        tbi = f"{OUT}/merged/merged.vcf.gz.tbi"
+    output:
+        vcf = f"{OUT}/merged/merged.filtered.vcf.gz",
+        tbi = f"{OUT}/merged/merged.filtered.vcf.gz.tbi"
+    conda:
+        "envs/bcftools.yaml"
+    threads:
+        config["resources"]["threads_bcftools"]
+    params:
+        max_missing = config["filters"]["max_missing"]
+    log:
+        f"{OUT}/logs/merge/filter_merged.log"
+    shell:
+        """
+        bcftools view \
+            --include "F_MISSING <= {params.max_missing}" \
+            --output-type z \
+            --threads {threads} \
+            --output {output.vcf} \
+            {input.vcf} \
+        2> {log}
+
+        tabix -p vcf {output.vcf} 2>> {log}
+
+        echo "Sites after missingness filter:" >> {log}
+        bcftools stats {output.vcf} | grep "^SN" >> {log}
+        """
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 5: Split merged VCF by chromosome
+#   - enables parallel PLINK2 conversion per chromosome
+# ──────────────────────────────────────────────────────────────────────────────
+rule split_by_chrom:
+    input:
+        vcf = f"{OUT}/merged/merged.filtered.vcf.gz",
+        tbi = f"{OUT}/merged/merged.filtered.vcf.gz.tbi"
+    output:
+        vcf = f"{OUT}/by_chrom/{{chrom}}.vcf.gz",
+        tbi = f"{OUT}/by_chrom/{{chrom}}.vcf.gz.tbi"
+    conda:
+        "envs/bcftools.yaml"
+    threads:
+        config["resources"]["threads_bcftools"]
+    log:
+        f"{OUT}/logs/split/{{chrom}}.log"
+    shell:
+        """
+        bcftools view \
+            --regions {wildcards.chrom} \
+            --output-type z \
+            --threads {threads} \
+            --output {output.vcf} \
+            {input.vcf} \
+        2> {log}
+
+        tabix -p vcf {output.vcf} 2>> {log}
+        """
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 6: Prepare per-chromosome VCFs for Michigan Imputation Server (MIS)
+#
+# MIS requirements:
+#   - Biallelic SNPs only (no indels, no multiallelic)
+#   - MAF >= 0.01 (rarer variants won't impute well)
+#   - No duplicate positions
+#   - Chromosome names must be numeric (1-22, no "chr" prefix)
+#   - Variants sorted by position
+#   - bgzipped + tabix indexed
+#   - Reference allele must match HRC GRCh37
+#
+# Note: MIS will perform its own QC and strand-flip correction. We do
+# conservative pre-filtering here to reduce upload size and ensure
+# compatibility. Eagle2 phasing is applied by MIS automatically.
+# ──────────────────────────────────────────────────────────────────────────────
+rule prepare_for_imputation:
+    input:
+        vcf = f"{OUT}/by_chrom/{{chrom}}.vcf.gz",
+        tbi = f"{OUT}/by_chrom/{{chrom}}.vcf.gz.tbi"
+    output:
+        vcf = f"{OUT}/for_imputation/{{chrom}}.vcf.gz",
+        tbi = f"{OUT}/for_imputation/{{chrom}}.vcf.gz.tbi"
+    conda:
+        "envs/bcftools.yaml"
+    threads:
+        config["resources"]["threads_bcftools"]
+    log:
+        f"{OUT}/logs/for_imputation/{{chrom}}.log"
+    shell:
+        """
+        set -euo pipefail
+        mkdir -p {OUT}/for_imputation
+
+        echo "Step 1: Site QC and SNP-only filter..." 2> {log}
+
+        bcftools view             --min-alleles 2             --max-alleles 2             --type snps             --output-type u             {input.vcf}             2>> {log}         | bcftools filter             --include 'F_MISSING <= 0.05'             --output-type u             2>> {log}         | bcftools view             --min-af 0.01:minor             --output-type u             2>> {log}         | bcftools norm             --rm-dup all             --output-type z             --output {output.vcf}             2>> {log}
+
+        tabix -p vcf {output.vcf} 2>> {log}
+
+        n=$(bcftools stats {output.vcf} | grep "^SN.*number of SNPs" | cut -f4)
+        echo "Chromosome {wildcards.chrom}: $n variants ready for imputation" >> {log}
+        """
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 7: Pre-imputation QC report
+# Summarises variant counts per chromosome ready for MIS upload.
+# ──────────────────────────────────────────────────────────────────────────────
+rule pre_imputation_report:
+    input:
+        vcfs = expand(
+            f"{OUT}/for_imputation/{{chrom}}.vcf.gz",
+            chrom=CHROMS
+        )
+    output:
+        report = f"{OUT}/qc/pre_imputation_report.txt"
+    conda:
+        "envs/bcftools.yaml"
+    log:
+        f"{OUT}/logs/qc/pre_imputation_report.log"
+    shell:
+        """
+        set -euo pipefail
+        mkdir -p {OUT}/qc
+
+        echo "=== PPMI WGS Pre-Imputation QC Report ===" >  {output.report}
+        echo "Reference panel target: HRC r1.1 2016 (GRCh37/hg19)" >> {output.report}
+        echo "" >> {output.report}
+        printf "%-6s %12s\n" "CHROM" "N_VARIANTS" >> {output.report}
+        printf "%-6s %12s\n" "-----" "----------" >> {output.report}
+
+        total=0
+        for vcf in {input.vcfs}; do
+            chrom=$(bcftools view -h "$vcf" | tail -1 |                     awk '{{print $1}}' | head -1 ||                     basename "$vcf" .vcf.gz)
+            n=$(bcftools stats "$vcf" | grep "^SN.*number of SNPs" | cut -f4)
+            printf "%-6s %12s\n" "$chrom" "$n" >> {output.report}
+            total=$((total + n))
+        done
+
+        echo "" >> {output.report}
+        echo "Total variants: $total" >> {output.report}
+        echo "" >> {output.report}
+        echo "Files ready for upload to Michigan Imputation Server:" >> {output.report}
+        echo "  https://imputationserver.sph.umich.edu" >> {output.report}
+        echo "  Panel: HRC r1.1 2016 | Build: GRCh37/hg19 | Population: EUR" >> {output.report}
+        echo "" >> {output.report}
+        echo "Upload files from: {OUT}/for_imputation/" >> {output.report}
+
+        cat {output.report}
+        """

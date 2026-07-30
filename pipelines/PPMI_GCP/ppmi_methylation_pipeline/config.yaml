@@ -1,0 +1,65 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# PPMI EPIC v2 Methylation Pipeline Configuration
+# IDATs → QC → Normalization → Beta Matrix
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Root directory containing per-batch IDAT subdirectories
+# Structure: {idat_dir}/{SENTRIX_ID}/
+#              {SENTRIX_ID}_R{ROW}C{COL}_Red.idat
+#              {SENTRIX_ID}_R{ROW}C{COL}_Grn.idat
+#              sample_sheet.csv
+idat_dir: "../../../Downloads/PPMI_GCP/idats"
+
+# Output directory
+out_dir: "../../../results/PPMI_GCP"
+
+# ── SeSAMe / QC parameters ────────────────────────────────────────────────────
+sesame:
+  # EPIC v2 array type identifier used by SeSAMe
+  array_type: "EPIC"    # confirmed EPIC v1 arrays
+
+  # pOOBAH detection p-value threshold — probes above this are masked as NA
+  # 0.05 is standard; lower (e.g. 0.01) is more stringent
+  pval_threshold: 0.05
+
+  # Minimum fraction of samples a probe must pass pOOBAH to be retained
+  # e.g. 0.90 = drop probe if > 10% of samples have poor signal
+  min_probe_detection_rate: 0.90
+
+  # Minimum fraction of probes passing pOOBAH for a sample to be retained
+  # e.g. 0.85 = drop sample if > 15% of probes have poor signal
+  min_sample_detection_rate: 0.85
+
+  # Normalization method: "NOOB" (recommended for EPIC v2 — background
+  # correction + dye-bias correction) then "BMIQ" for type I/II probe balance
+  normalization: "NOOB"
+
+# ── Probe exclusion filters ───────────────────────────────────────────────────
+filters:
+  # Remove probes on sex chromosomes (X, Y) — avoids sex confounding
+  remove_sex_probes: true
+
+  # Remove cross-reactive probes (known to hybridize off-target)
+  # Uses the Zhou et al. 2017 / EPICv2 mask published by SeSAMe
+  remove_cross_reactive: true
+
+  # Remove probes containing SNPs at or near CpG site (MAF > 0.01)
+  # Prevents genotype effects confounding methylation estimates
+  remove_snp_probes: true
+
+  # Remove probes with > this fraction of samples having beta = NA after masking
+  max_probe_na_fraction: 0.10
+
+# ── Cell-type deconvolution ───────────────────────────────────────────────────
+deconvolution:
+  # Run EpiDISH blood deconvolution on normalized betas
+  # Results appended to master sample sheet as covariates
+  run: true
+  method: "RPC"    # robust partial correlations — recommended for blood
+
+# ── Compute resources ─────────────────────────────────────────────────────────
+resources:
+  # Threads for R-based steps (SeSAMe is mostly single-threaded per batch)
+  threads_r: 2
+  # Threads for final matrix assembly (pandas/data.table concatenation)
+  threads_combine: 4

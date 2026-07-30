@@ -1,0 +1,75 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# PPMI mQTL Pipeline Configuration
+# PPMI methylation (EPIC v1) + WGS genotypes → stratified baseline mQTLs
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Input data paths (relative to pipeline directory) ─────────────────────────
+data:
+  # Beta matrix from IDAT pipeline — columns named {SubjectID}_T{visit}
+  beta_matrix:     "../../results/PPMI_GCP/local_results/final/beta_matrix.csv.gz"
+  # Cell-type proportions from EpiDISH (IDAT pipeline output)
+  cell_type_props: "../../results/PPMI_GCP/local_results/final/cell_type_proportions.csv"
+  # PLINK2 genome-wide pfiles (WGS pipeline output) — prefix without extension
+  plink_prefix:    "../../results/PPMI_WGS/post_imputed/ppmi_imputed"
+  # PPMI participant status / phenotype file
+  phenotype_file:  "../../Downloads/PPMI_covariates/Participant_Status_14Dec2025.csv"
+
+# Output directory
+out_dir: "../../results/PPMI_MQTL"
+
+# ── ID transformation rules ───────────────────────────────────────────────────
+# Methylation columns:  {PATNO}_T{visit}    e.g. 10874_T1
+# PLINK2 sample IDs:    PPMISI{PATNO}.variant2  e.g. PPMISI10874.variant2
+#   (MIS preserved original VCF sample IDs; .variant2 = actual genotype data)
+#   (psam has proper #FID column so keep files use FID IID, not 0 IID)
+# Phenotype file ID:    PATNO               e.g. 10874
+#
+# IMPORTANT: verify by running:
+#   head -5 ../../results/PPMI_WGS/post_imputed/ppmi_imputed.psam
+# If IDs differ, update plink_prefix/plink_suffix accordingly.
+id:
+  meth_visit:   1       # baseline visit number to extract (T1)
+  plink_prefix: "PPMISI" # prefix in PLINK2 IDs to strip when matching PATNO
+  plink_suffix: ".variant2" # MIS preserved original VCF sample IDs incl. .variant2
+
+# ── PPMI cohort definitions ───────────────────────────────────────────────────
+# COHORT column values in Participant_Status file
+cohorts:
+  case:    1   # Parkinson's Disease
+  control: 2   # Healthy Control
+
+# ── Datasets to run mQTLs on ──────────────────────────────────────────────────
+datasets:
+  ppmi_cases:
+    label:  "PPMI PD Cases (baseline)"
+    cohort: 1
+  ppmi_controls:
+    label:  "PPMI Healthy Controls (baseline)"
+    cohort: 2
+
+# ── Probe filtering ────────────────────────────────────────────────────────────
+filters:
+  min_sd:          0.02
+  max_na_fraction: 0.05   # slightly more permissive than PEG given larger N
+
+# ── MatrixEQTL settings ────────────────────────────────────────────────────────
+# Thresholds matched to PEG pipeline to ensure comparable meta-analysis inputs
+matrixeqtl:
+  cis_dist:    1000000
+  pval_cis:    1e-5    # keep current — already 3.3M pairs at this threshold
+  pval_trans:  1e-20   # effectively disabled — insufficient power for trans
+                       # in individual cohorts; revisit with larger N
+  model:       "linear"
+
+# ── PLINK2 QC filters ─────────────────────────────────────────────────────────
+plink:
+  maf:   0.05   # consistent with PEG imputed genotype threshold
+  geno:  0.05
+  mind:  0.10
+  hwe:   1e-6
+
+# ── Compute resources ──────────────────────────────────────────────────────────
+resources:
+  threads_r:     1
+  threads_plink: 1
+

@@ -1,0 +1,80 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# PEG metQTL Pipeline Configuration
+# PEG C18 + HILIC untargeted metabolomics + imputed genotypes -> metQTLs
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Input data paths (relative to pipeline directory) ─────────────────────────
+data:
+  c18_rdata:    "../../Downloads/PEG_METAB/PEG_c18_quant_combat_LOD_cc.t.RData"
+  c18_keyvar:   "../../Downloads/PEG_METAB/c18_keyVar_link_cc.RData"
+  hilic_rdata:  "../../Downloads/PEG_METAB/PEG_hilic_quant_combat_PC_LOD_cc.t.RData"
+  hilic_keyvar: "../../Downloads/PEG_METAB/hilic_keyVar_link_cc.RData"
+  covar_peg1:   "../../Downloads/PEG_covariates/covariates_peg1.csv"
+  covar_peg2:   "../../Downloads/PEG_covariates/covariates_peg2.csv"
+  vcf:          "../../results/PEG_WGS/post_imputed/peg_imputed_filtered.dose.vcf.gz"
+  gwas_linkage: "../../Downloads/PEG_WGS/gwas_linkage.csv"
+
+# Output directory
+out_dir: "../../results/PEG_METAB"
+
+# ── Metabolomics platforms ─────────────────────────────────────────────────────
+platforms:
+  - c18
+  - hilic
+
+# ── Datasets to process ───────────────────────────────────────────────────────
+# Each entry is platform_wave_casegroup
+datasets:
+  c18_peg1_cases:
+    platform:   "c18"
+    wave:       1
+    case_group: "cases"
+  c18_peg1_controls:
+    platform:   "c18"
+    wave:       1
+    case_group: "controls"
+  c18_peg2_cases:
+    platform:   "c18"
+    wave:       2
+    case_group: "cases"
+  hilic_peg1_cases:
+    platform:   "hilic"
+    wave:       1
+    case_group: "cases"
+  hilic_peg1_controls:
+    platform:   "hilic"
+    wave:       1
+    case_group: "controls"
+  hilic_peg2_cases:
+    platform:   "hilic"
+    wave:       2
+    case_group: "cases"
+
+# ── Feature filtering ─────────────────────────────────────────────────────────
+filters:
+  min_sd:          0.01   # minimum SD across samples to retain feature
+  max_na_fraction: 0.20   # max missingness per feature (LOD imputation already applied)
+
+# ── MatrixEQTL settings ───────────────────────────────────────────────────────
+matrixeqtl:
+  cis_dist:    1000000  # cis window in bp (1 Mb)
+  pval_cis:    1e-5     # cis output threshold
+  pval_trans:  1e-8     # trans output threshold
+  model:       "linear"
+
+# ── Imputation quality filter ─────────────────────────────────────────────────
+imputation:
+  min_r2:  0.8
+  min_maf: 0.05
+
+# ── PLINK2 QC filters ────────────────────────────────────────────────────────
+plink:
+  maf:   0.05
+  geno:  0.05
+  mind:  0.10
+  hwe:   1e-6
+
+# ── Compute resources ─────────────────────────────────────────────────────────
+resources:
+  threads_r:     1
+  threads_plink: 1

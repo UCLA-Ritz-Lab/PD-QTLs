@@ -1,0 +1,844 @@
+---
+title: "mQTL Meta-Analysis: PEG + PPMI"
+author: "Your Name"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    code_folding: show
+  pdf_document:
+    toc: true
+    toc_depth: '3'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = NA,
+  warning = FALSE,
+  cache   = TRUE,
+  fig.width  = 8,
+  fig.height = 6
+)
+options(knitr.chunk.echo=TRUE)
+```
+
+```{r libraries}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(data.table)
+  library(meta)        # r-meta: metagen() for inverse-variance meta-analysis
+  library(ggplot2)
+  library(patchwork)
+  library(scales)
+})
+```
+
+---
+
+# 1. Configuration
+
+```{r config}
+# ── Paths to cis mQTL result files ───────────────────────────────────────────
+RESULTS <- list(
+  peg1_cases    = "../../results/PEG_MQTL/mqtl/peg1_cases/cis_mqtls.txt",
+  peg1_controls = "../../results/PEG_MQTL/mqtl/peg1_controls/cis_mqtls.txt",
+  peg2_cases    = "../../results/PEG_MQTL/mqtl/peg2_cases/cis_mqtls.txt",
+  ppmi_cases    = "../../results/PPMI_MQTL/mqtl/ppmi_cases/cis_mqtls.txt",
+  ppmi_controls = "../../results/PPMI_MQTL/mqtl/ppmi_controls/cis_mqtls.txt"
+)
+
+# Meta-analysis groupings
+# Cases:    PEG1 × PPMI two-way — comparable sample sizes to controls
+#           PEG2 excluded from primary; used as sensitivity analysis below
+# Controls: PEG1 × PPMI two-way
+# Rationale: 3-way PEG1 ∩ PEG2 ∩ PPMI yields only ~2 pairs;
+#            PEG1 ∩ PPMI yields ~1032 pairs which is tractable.
+META_GROUPS <- list(
+  cases    = c("peg1_cases",    "ppmi_cases"),
+  controls = c("peg1_controls", "ppmi_controls")
+)
+
+# Sensitivity: 3-way intersection including PEG2 cases
+SENSITIVITY_GROUPS <- list(
+  cases_peg2_sensitivity = c("peg1_cases", "peg2_cases", "ppmi_cases")
+)
+
+# Output directory
+META_DIR <- "../../results/META_MQTL/meta"
+dir.create(META_DIR, recursive=TRUE, showWarnings=FALSE)
+dir.create("../../results/META_MQTL/qc", recursive=TRUE, showWarnings=FALSE)
+
+# Labels and colors
+DATASET_LABELS <- c(
+  peg1_cases    = "PEG1 Cases",
+  peg1_controls = "PEG1 Controls",
+  peg2_cases    = "PEG2 Cases",
+  ppmi_cases    = "PPMI Cases",
+  ppmi_controls = "PPMI Controls"
+)
+
+DATASET_COLORS <- c(
+  peg1_cases    = "#E41A1C",
+  peg1_controls = "#377EB8",
+  peg2_cases    = "#FF7F00",
+  ppmi_cases    = "#4DAF4A",
+  ppmi_controls = "#984EA3"
+)
+```
+
+---
+
+# 2. Load mQTL Results
+
+```{r load-results, cache=TRUE, cache.lazy = FALSE}
+load_mqtl <- function(path, dataset_name) {
+  message(sprintf("Loading dataset %s",dataset_name))
+  if (!file.exists(path)) {
+    warning(sprintf("File not found: %s", path))
+    return(NULL)
+  }
+  dat <- fread(path, data.table=FALSE)
+
+  # Normalise column names — MatrixEQTL output varies between pipelines:
+  # PEG uses:  SNP  gene  beta  t-stat  p-value  FDR
+  # PPMI uses: snps gene  beta  t-stat  p-value  FDR
+  col_map <- c(
+    "SNP"     = "snp_id",
+    "snps"    = "snp_id",
+    "gene"    = "cpg_id",
+    "p-value" = "pvalue",
+    "p.value" = "pvalue",
+    "t-stat"  = "tstat",
+    "t.stat"  = "tstat",
+    "FDR"     = "fdr_dataset"
+  )
+  matches <- col_map[names(col_map) %in% colnames(dat)]
+  if (length(matches) > 0)
+    setnames(dat, old=names(matches), new=unname(matches))
+
+  required <- c("snp_id", "cpg_id", "beta", "pvalue", "tstat")
+  missing  <- setdiff(required, colnames(dat))
+  if (length(missing) > 0) {
+    warning(sprintf(
+      "%s: missing columns after rename: %s\nActual columns: %s",
+      dataset_name, paste(missing, collapse=", "),
+      paste(colnames(dat), collapse=", ")
+    ))
+    return(NULL)
+  }
+
+  # ── Normalise SNP IDs to chr:pos so pair_id matches across cohorts ─────────
+  # PEG SNP IDs are already chr:pos (e.g. "1:1446221") from imputation.
+  # PPMI SNP IDs are chr:pos:ref:alt (e.g. "1:1365759:G:A") from WGS.
+  # Stripping any trailing :REF:ALT normalises both to a common chr:pos key
+  # without needing a lookup join, which avoids brittleness if the position
+  # files and mQTL output ever drift out of sync.
+  dat$snp_chrpos <- sub("^([0-9XYM]+:[0-9]+):[ACGT]+:[ACGT]+$", "\\1", dat$snp_id)
+
+  n_stripped <- sum(dat$snp_chrpos != dat$snp_id)
+  cat(sprintf("  %-20s: %s SNP IDs had allele suffix stripped (%s unchanged)\n",
+      dataset_name,
+      format(n_stripped, big.mark=","),
+      format(nrow(dat) - n_stripped, big.mark=",")))
+
+  dat <- dat %>%
+    mutate(
+      dataset = dataset_name,
+      se      = abs(beta / tstat),
+      pair_id = paste(snp_chrpos, cpg_id, sep="|")
+    ) %>%
+    filter(!is.na(se), se > 0, !is.na(beta), !is.na(pvalue))
+
+  cat(sprintf("  %-20s: %s associations\n",
+      dataset_name, format(nrow(dat), big.mark=",")))
+  dat
+}
+
+
+cat("Loading cis mQTL results:\n")
+message("Loading cis mQTL results:\n")
+mqtl_list <- imap(RESULTS, function(path, nm) {
+  load_mqtl(path, nm)
+})
+mqtl_list <- Filter(Negate(is.null), mqtl_list)
+
+cat(sprintf("\nDatasets loaded: %d / %d\n",
+    length(mqtl_list), length(RESULTS)))
+```
+
+---
+
+# 3. P-value QC
+
+## 3.1 Result Summary
+
+> **Note on Lambda GC:** Lambda GC is not reported here because MatrixEQTL
+> outputs only associations passing the significance threshold
+> (`pval_cis = 1e-3` for PEG, `pval_cis = 1e-5` for PPMI). Computing lambda
+> on a filtered tail of the p-value distribution produces artificially
+> inflated values that are meaningless. Lambda GC is only valid when computed
+> on the complete null distribution. QQ plots in Section 3.2 provide valid
+> visual QC for the significant associations we do have.
+
+```{r result-summary}
+summary_df <- imap_dfr(mqtl_list, function(dat, nm) {
+  data.frame(
+    dataset     = nm,
+    label       = DATASET_LABELS[nm],
+    n_assoc     = nrow(dat),
+    n_fdr05     = if ("fdr_dataset" %in% colnames(dat))
+                    sum(dat$fdr_dataset < 0.05, na.rm=TRUE) else NA,
+    n_p1e5      = sum(dat$pvalue < 1e-5,  na.rm=TRUE),
+    n_p1e8      = sum(dat$pvalue < 1e-8,  na.rm=TRUE),
+    median_beta = round(median(abs(dat$beta), na.rm=TRUE), 4),
+    max_beta    = round(max(abs(dat$beta),    na.rm=TRUE), 4),
+    n_extreme   = sum(abs(dat$beta) > 1,   na.rm=TRUE),
+    stringsAsFactors = FALSE
+  )
+})
+
+summary_df %>%
+  mutate(
+    n_assoc = format(n_assoc, big.mark=","),
+    n_fdr05 = format(n_fdr05, big.mark=","),
+    n_p1e5  = format(n_p1e5,  big.mark=","),
+    n_p1e8  = format(n_p1e8,  big.mark=",")
+  ) %>%
+  select(label, n_assoc, n_fdr05, n_p1e5, n_p1e8,
+         median_beta, max_beta, n_extreme) %>%
+  knitr::kable(
+    col.names = c("Dataset", "N assoc", "FDR<0.05", "p<1e-5", "p<1e-8",
+                  "Median |β|", "Max |β|", "N |β|>1 (outliers)"),
+    caption   = paste("Per-dataset cis-mQTL summary.",
+                      "FDR computed by MatrixEQTL over all tested cis pairs",
+                      "(noFDRsaveMemory=FALSE) — valid for within-dataset use.",
+                      "Cross-cohort FDR (FDR_BH) is computed on meta-analysis",
+                      "p-values in Section 5.")
+  )
+
+# ── Flag extreme beta values ──────────────────────────────────────────────────
+# Methylation beta values should be bounded 0-1. Effect sizes (beta) in mQTL
+# analysis represent change in methylation per unit allele dosage and should
+# therefore be well within [-1, 1] for a properly scaled analysis.
+# Values >> 1 indicate a scaling issue in the methylation or covariate matrix.
+extreme_datasets <- summary_df %>% filter(max_beta > 1)
+if (nrow(extreme_datasets) > 0) {
+  cat("\n⚠️  WARNING: Extreme beta values detected (|β| > 1):\n")
+  for (i in seq_len(nrow(extreme_datasets))) {
+    cat(sprintf("   %-20s: max|β| = %.2f, n outliers = %s\n",
+                extreme_datasets$dataset[i],
+                extreme_datasets$max_beta[i],
+                format(extreme_datasets$n_extreme[i], big.mark=",")))
+  }
+  cat("\n   This most likely indicates a scaling issue in the PPMI methylation\n")
+  cat("   or covariate matrix. Possible causes:\n")
+  cat("   - Methylation matrix not in beta [0,1] scale (e.g. M-values used)\n")
+  cat("   - A covariate column with large numeric range (e.g. age in years\n")
+  cat("     not standardised) creating numerical instability in MatrixEQTL\n")
+  cat("   - Batch variable included without dummy-coding\n")
+  cat("   Recommend investigating PPMI results before proceeding with meta-analysis.\n")
+}
+```
+
+```{r counts-plot, fig.height=4}
+# Bar chart of association counts at different p-value thresholds
+summary_df %>%
+  select(label, dataset, n_p1e5, n_p1e8) %>%
+  pivot_longer(c(n_p1e5, n_p1e8),
+               names_to="threshold", values_to="n") %>%
+  mutate(threshold = factor(threshold,
+    levels = c("n_p1e5", "n_p1e8"),
+    labels = c("p < 1e-5", "p < 1e-8"))) %>%
+  ggplot(aes(x=label, y=n, fill=dataset)) +
+  geom_col(position="dodge", width=0.7) +
+  scale_fill_manual(values=DATASET_COLORS, guide="none") +
+  scale_y_continuous(labels=comma) +
+  facet_wrap(~threshold, scales="free_y") +
+  labs(title="Significant Associations per Dataset",
+       x=NULL, y="Count") +
+  theme_minimal(base_size=11) +
+  theme(axis.text.x=element_text(angle=30, hjust=1))
+```
+
+## 3.2 QQ Plots
+
+```{r qq-function}
+# n_total: true number of tests the retained p-values were drawn from
+# (e.g. all cis SNP-CpG pairs MatrixEQTL actually evaluated), when the
+# input pvalues are only the smallest n of a much larger, left-truncated
+# set. Order statistic i of n retained values is then the i-th smallest
+# of n_total, not of n, so expected quantiles and the Beta CI ribbon
+# must be computed against n_total. Defaults to n (i.e. assumes pvalues
+# is the complete, untruncated set) when n_total is not supplied.
+make_qq <- function(pvalues, title, color="steelblue", max_pts=1e6, n_total=NULL) {
+  pvalues <- pvalues[!is.na(pvalues) & pvalues > 0 & pvalues <= 1]
+  top     <- pvalues <= 1e-4
+  if (sum(!top) > max_pts)
+    pvalues <- c(pvalues[top],
+                 sample(pvalues[!top], max_pts))
+  n   <- length(pvalues)
+  if (is.null(n_total)) n_total <- n
+  rank  <- seq_len(n)
+  a     <- 0.5
+  obs   <- sort(-log10(pvalues))
+  exp   <- sort(-log10((rank - a) / (n_total + 1 - 2 * a)))
+  ci_hi <- -log10(qbeta(0.025, rank, n_total - rank + 1))
+  ci_lo <- -log10(qbeta(0.975, rank, n_total - rank + 1))
+
+  ggplot(data.frame(exp=exp, obs=obs,
+                    ci_hi=sort(ci_hi), ci_lo=sort(ci_lo)),
+         aes(x=exp, y=obs)) +
+    geom_ribbon(aes(ymin=ci_lo, ymax=ci_hi),
+                fill="lightblue", alpha=0.4) +
+    geom_point(size=0.5, alpha=0.5, color=color) +
+    geom_abline(slope=1, intercept=0,
+                color="red", linewidth=0.7) +
+    labs(title    = title,
+         subtitle = sprintf("n = %s%s", format(n, big.mark=","),
+                             if (n_total > n)
+                               sprintf(" (of %s cis tests)", format(n_total, big.mark=","))
+                             else ""),
+         x="Expected  –log₁₀(p)",
+         y="Observed  –log₁₀(p)") +
+    theme_minimal(base_size=11) +
+    theme(plot.subtitle=element_text(size=9, color="grey40"))
+}
+```
+
+```{r qq-plots, fig.width=14, fig.height=9, cache=TRUE}
+n_cis_tests_df <- read.csv("../../results/META_MQTL/qc/n_cis_tests.csv")
+n_cis_tests <- setNames(n_cis_tests_df$n_total, n_cis_tests_df$dataset)
+
+qq_plots <- imap(mqtl_list, function(dat, nm)
+  make_qq(dat$pvalue, DATASET_LABELS[nm], DATASET_COLORS[nm],
+          n_total = n_cis_tests[[nm]]))
+
+wrap_plots(qq_plots, ncol=3) +
+  plot_annotation(
+    title = "QQ Plots — Per-Dataset Cis mQTL Analyses",
+    theme = theme(plot.title=element_text(size=15, face="bold"))
+  )
+```
+
+## 3.3 Effect Size Distributions
+
+```{r beta-dist, fig.height=4}
+imap_dfr(mqtl_list, function(dat, nm)
+  dat %>%
+    slice_sample(n=min(100000, nrow(dat))) %>%
+    mutate(label=DATASET_LABELS[nm])
+) %>%
+  ggplot(aes(x=beta, color=dataset, fill=dataset)) +
+  geom_density(alpha=0.15, linewidth=0.7) +
+  scale_color_manual(values=DATASET_COLORS, labels=DATASET_LABELS) +
+  scale_fill_manual( values=DATASET_COLORS, labels=DATASET_LABELS) +
+  geom_vline(xintercept=0, linetype="dashed", color="grey40") +
+  labs(title="Effect Size (β) Distributions — Cis mQTLs",
+       subtitle="Sampled to 100K associations per dataset",
+       x="Beta", y="Density", color=NULL, fill=NULL) +
+  theme_minimal(base_size=13) +
+  theme(legend.position="bottom")
+```
+
+---
+
+# 4. Meta-Analysis with r-meta
+
+## 4.1 Strategy
+
+We use **fixed-effects inverse-variance weighted (IVW) meta-analysis**
+via `metagen()` from the `meta` package. Fixed effects is appropriate
+here because we are combining results from cohorts drawn from the same
+biological population — we want to estimate a common true effect, not
+the distribution of effects across populations.
+
+For each SNP-CpG pair tested in multiple datasets:
+
+- **Effect size:** β from MatrixEQTL
+- **Standard error:** SE = |β / t-stat|
+- **Method:** IVW fixed effects (`method.tau="DL"` for heterogeneity)
+- **Heterogeneity:** Cochran's Q and I² reported for significant hits
+
+## 4.2 Run Meta-Analysis Per Group
+
+```{r meta-analysis, cache=TRUE}
+run_meta_group <- function(group_name, dataset_names) {
+  cat(sprintf("\n=== %s meta-analysis ===\n", group_name))
+  message(sprintf("\n=== %s meta-analysis ===\n", group_name))
+  group_data <- mqtl_list[dataset_names]
+  group_data <- Filter(Negate(is.null), group_data)
+
+  if (length(group_data) == 0) {
+    cat("No data available\n")
+    return(NULL)
+  }
+
+  cat(sprintf("Datasets: %s\n", paste(names(group_data), collapse=", ")))
+  message(sprintf("Datasets: %s\n", paste(names(group_data), collapse=", ")))
+  # ── Strict intersection ───────────────────────────────────────────────────
+  # Only meta-analyse pairs significant in ALL constituent datasets.
+  # This is computationally tractable and focuses on robustly replicated signals.
+  # Individual cohort thresholds are set permissively (pval_cis = 1e-3 for PEG,
+  # 1e-5 for PPMI) so the intersection captures pairs that clear the bar in both.
+  common_pairs <- Reduce(intersect, lapply(group_data, function(d) d$pair_id))
+  cat(sprintf("SNP-CpG pairs in all datasets: %s\n",
+      format(length(common_pairs), big.mark=",")))
+
+  message(sprintf("SNP-CpG pairs in all datasets: %s\n",
+      format(length(common_pairs), big.mark=",")))
+  if (length(common_pairs) == 0) {
+    cat("No common pairs — check SNP and probe intersection\n")
+    return(NULL)
+  }
+
+  # Subset each dataset to common pairs and align
+  aligned <- lapply(names(group_data), function(nm) {
+    group_data[[nm]] %>%
+      filter(pair_id %in% common_pairs) %>%
+      select(pair_id, snp_id, cpg_id, beta, se, pvalue) %>%
+      rename_with(~paste0(., "_", nm), c(beta, se, pvalue, snp_id, cpg_id))
+  })
+
+  # Inner join — all pairs present in all datasets by construction
+  merged <- Reduce(function(a, b) inner_join(a, b, by="pair_id"), aligned)
+
+  # Recover snp_id and cpg_id from first dataset
+  first_nm <- names(group_data)[1]
+  merged <- merged %>%
+    rename(snp_id = paste0("snp_id_", first_nm),
+           cpg_id = paste0("cpg_id_", first_nm)) %>%
+    select(-matches("^snp_id_|^cpg_id_"))
+
+  cat(sprintf("Pairs after alignment join: %s\n",
+      format(nrow(merged), big.mark=",")))
+  message(sprintf("Pairs after alignment join: %s\n",
+      format(nrow(merged), big.mark=",")))
+
+  beta_cols <- paste0("beta_", names(group_data))
+  se_cols   <- paste0("se_",   names(group_data))
+
+  cat("Running metagen()...\n")
+
+  message("Running metagen()...\n")
+
+  meta_results <- lapply(seq_len(nrow(merged)), function(i) {
+    betas <- as.numeric(merged[i, beta_cols])
+    ses   <- as.numeric(merged[i, se_cols])
+
+    if (any(is.na(betas)) || any(is.na(ses)) || any(ses <= 0))
+      return(NULL)
+
+    mg <- tryCatch(
+      metagen(TE=betas, seTE=ses,
+              studlab    = names(group_data),
+              method.tau = "DL",
+              common     = TRUE,
+              random     = FALSE),
+      error = function(e) NULL
+    )
+    if (is.null(mg)) return(NULL)
+
+    data.frame(
+      pair_id    = merged$pair_id[i],
+      snp_id     = merged$snp_id[i],
+      cpg_id     = merged$cpg_id[i],
+      meta_beta  = mg$TE.common,
+      meta_se    = mg$seTE.common,
+      meta_pval  = mg$pval.common,
+      meta_z     = mg$zval.common,
+      Q          = mg$Q,
+      Q_pval     = mg$pval.Q,
+      I2         = mg$I2,
+      n_datasets = length(betas),
+      stringsAsFactors = FALSE
+    )
+  })
+
+  meta_df <- bind_rows(Filter(Negate(is.null), meta_results))
+
+  if (nrow(meta_df) == 0) {
+    cat("No results produced\n")
+    return(NULL)
+  }
+
+  # FDR correction
+  meta_df <- meta_df %>%
+    arrange(meta_pval) %>%
+    mutate(FDR_BH = p.adjust(meta_pval, method="BH"))
+
+  cat(sprintf("Meta-analysis complete: %s pairs\n",
+      format(nrow(meta_df), big.mark=",")))
+  cat(sprintf("  FDR < 0.05: %s\n",
+      format(sum(meta_df$FDR_BH < 0.05, na.rm=TRUE), big.mark=",")))
+  cat(sprintf("  FDR < 0.10: %s\n",
+      format(sum(meta_df$FDR_BH < 0.10, na.rm=TRUE), big.mark=",")))
+  cat(sprintf("  p < 1e-8:   %s\n",
+      format(sum(meta_df$meta_pval < 1e-8, na.rm=TRUE), big.mark=",")))
+
+  # Save full results
+  out_file <- file.path(META_DIR,
+                         paste0(group_name, "_meta_results.csv.gz"))
+  fwrite(meta_df, out_file)
+  cat(sprintf("  Saved: %s\n", basename(out_file)))
+
+  invisible(meta_df)
+}
+
+# NOTE: metagen() is called once per SNP-CpG pair.
+# For large datasets this can take 30-60 minutes.
+# Results are cached — delete cache/ to rerun.
+meta_results <- list()
+for (group in names(META_GROUPS)) {
+  meta_results[[group]] <- run_meta_group(group, META_GROUPS[[group]])
+}
+
+# ── Sensitivity analysis: 3-way intersection including PEG2 cases ─────────────
+# PEG2 is cases-only (Wave 2). The 3-way PEG1 ∩ PEG2 ∩ PPMI intersection
+# is very strict but identifies the most robustly replicated signals.
+message("Running sensitivity analysis (PEG1 + PEG2 + PPMI cases 3-way)...")
+sensitivity_results <- list()
+for (group in names(SENSITIVITY_GROUPS)) {
+  sensitivity_results[[group]] <- run_meta_group(
+    group, SENSITIVITY_GROUPS[[group]])
+}
+
+# ── Flag primary cases hits also significant in PEG2 ─────────────────────────
+if (!is.null(meta_results$cases) && nrow(meta_results$cases) > 0) {
+  peg2_pairs <- mqtl_list$peg2_cases$pair_id
+  meta_results$cases$in_peg2 <- meta_results$cases$pair_id %in% peg2_pairs
+  message(sprintf("Primary cases hits also significant in PEG2: %d / %d",
+      sum(meta_results$cases$in_peg2, na.rm=TRUE),
+      nrow(meta_results$cases)))
+}
+```
+
+---
+
+# 5. Meta-Analysis Results
+
+## 5.1 Summary
+
+```{r meta-summary}
+summary_df <- imap_dfr(meta_results, function(dat, group) {
+  if (is.null(dat) || nrow(dat) == 0) return(NULL)
+  data.frame(
+    group      = str_to_title(group),
+    n_pairs    = nrow(dat),
+    pct_fdr05  = round(100 * mean(dat$FDR_BH < 0.05, na.rm=TRUE), 1),
+    n_fdr05    = sum(dat$FDR_BH    < 0.05, na.rm=TRUE),
+    n_fdr10    = sum(dat$FDR_BH    < 0.10, na.rm=TRUE),
+    n_p1e5     = sum(dat$meta_pval < 1e-5, na.rm=TRUE),
+    n_p1e8     = sum(dat$meta_pval < 1e-8, na.rm=TRUE),
+    n_in_peg2  = if ("in_peg2" %in% colnames(dat))
+                   sum(dat$in_peg2, na.rm=TRUE) else NA,
+    pct_het    = round(100 * mean(dat$Q_pval < 0.05, na.rm=TRUE), 1),
+    stringsAsFactors = FALSE
+  )
+})
+
+if (is.null(summary_df) || nrow(summary_df) == 0) {
+  cat("No meta-analysis results available yet — run Section 4.2 first.
+")
+} else {
+  summary_df %>%
+    mutate(across(c(n_pairs, n_fdr05, n_fdr10, n_p1e5, n_p1e8, n_in_peg2),
+                  ~format(.x, big.mark=","))) %>%
+    knitr::kable(
+      col.names = c("Group", "Pairs", "% FDR<0.05", "FDR<0.05",
+                    "FDR<0.10", "p<1e-5", "p<1e-8",
+                    "Also in PEG2", "% heterogeneous"),
+      caption   = paste("Meta-analysis summary (Cases: PEG1 × PPMI two-way;",
+                        "Controls: PEG1 × PPMI two-way).",
+                        "'Also in PEG2' = primary hits also significant in PEG2",
+                        "at pval_cis < 1e-3, providing three-cohort support.",
+                        "FDR_BH computed on meta-analysis p-values.")
+    )
+    
+}
+```
+
+## 5.2 QQ Plots — Meta-Analysis
+
+```{r meta-qq, fig.width=11, fig.height=5}
+meta_qq <- imap(meta_results, function(dat, group) {
+  if (is.null(dat)) return(NULL)
+  make_qq(dat$meta_pval,
+          title = sprintf("%s Meta-Analysis", str_to_title(group)),
+          color = ifelse(group=="cases", "#E41A1C", "#377EB8"))
+})
+meta_qq <- Filter(Negate(is.null), meta_qq)
+
+if (length(meta_qq) > 0)
+  wrap_plots(meta_qq, ncol=2) +
+    plot_annotation(
+      title = "QQ Plots — Meta-Analysis Results",
+      theme = theme(plot.title=element_text(size=15, face="bold"))
+    )
+```
+
+## 5.3 Top Meta-mQTLs
+
+```{r top-meta-hits}
+fmt_pval <- function(x) {
+  case_when(
+    is.na(x)       ~ "NA",
+    x < 1e-300     ~ "< 1e-300",
+    x < 0.001      ~ formatC(x, format="e", digits=2),
+    TRUE           ~ as.character(round(x, 4))
+  )
+}
+
+for (group in names(meta_results)) {
+  dat <- meta_results[[group]]
+  if (is.null(dat) || nrow(dat) == 0) {
+    cat(sprintf("\n### %s — no results\n", str_to_title(group)))
+    next
+  }
+
+  cat(sprintf("\n### %s — Top 20\n", str_to_title(group)))
+
+  top20 <- dat %>%
+    arrange(meta_pval) %>%
+    slice_head(n=20)
+
+  # Pull per-study beta and p-value for each top pair
+  datasets_in_group <- META_GROUPS[[group]]
+  per_study <- lapply(datasets_in_group, function(nm) {
+    mqtl_list[[nm]] %>%
+      filter(pair_id %in% top20$pair_id) %>%
+      select(pair_id, beta, pvalue) %>%
+      rename_with(~paste0(nm, "_", .), c(beta, pvalue))
+  })
+  per_study_df <- Reduce(function(a, b)
+    left_join(a, b, by="pair_id"), per_study)
+
+  # Join per-study stats to top20
+  top20 <- top20 %>%
+    left_join(per_study_df, by="pair_id")
+
+  # Build dynamic column list
+  study_beta_cols <- paste0(datasets_in_group, "_beta")
+  study_pval_cols <- paste0(datasets_in_group, "_pvalue")
+
+  top20 %>%
+    select(snp_id, cpg_id, meta_beta, meta_se,
+           meta_pval, FDR_BH, I2, Q_pval,
+           all_of(c(study_beta_cols, study_pval_cols))) %>%
+    mutate(
+      meta_beta = round(meta_beta, 4),
+      meta_se   = round(meta_se,   4),
+      meta_pval = fmt_pval(meta_pval),
+      FDR_BH    = fmt_pval(FDR_BH),
+      I2        = round(I2, 1),
+      Q_pval    = fmt_pval(Q_pval),
+      across(all_of(study_beta_cols), ~round(.x, 4)),
+      across(all_of(study_pval_cols), ~fmt_pval(.x))
+    ) %>%
+    knitr::kable(
+      col.names = c(
+        "SNP", "CpG", "Meta β", "Meta SE",
+        "Meta p", "FDR", "I²", "Q p",
+        paste0(datasets_in_group, " β"),
+        paste0(datasets_in_group, " p")
+      ),
+      caption = sprintf("Top 20 %s meta-mQTLs with per-study statistics",
+                        group)
+    ) %>%
+    print()
+}
+```
+
+## 5.4 Cases vs Controls Comparison
+
+For mQTL pairs significant in both meta-analyses, compare effect sizes:
+
+```{r cases-vs-controls, fig.height=5}
+if (!is.null(meta_results$cases) && !is.null(meta_results$controls)) {
+
+  shared <- inner_join(
+    meta_results$cases    %>% select(pair_id, snp_id, cpg_id,
+                                      beta_cases=meta_beta,
+                                      pval_cases=meta_pval,
+                                      fdr_cases=FDR_BH),
+    meta_results$controls %>% select(pair_id,
+                                      beta_ctrls=meta_beta,
+                                      pval_ctrls=meta_pval,
+                                      fdr_ctrls=FDR_BH),
+    by="pair_id"
+  )
+
+  cat(sprintf("Pairs tested in both groups: %s\n",
+      format(nrow(shared), big.mark=",")))
+
+  sig_either <- shared %>%
+    filter(fdr_cases < 0.05 | fdr_ctrls < 0.05) %>%
+    mutate(
+      sig_group = case_when(
+        fdr_cases < 0.05 & fdr_ctrls < 0.05 ~ "Both",
+        fdr_cases < 0.05                     ~ "Cases only",
+        fdr_ctrls < 0.05                     ~ "Controls only",
+        TRUE                                  ~ "Neither"
+      )
+    )
+
+  cat(sprintf("FDR<0.05 in either group: %s\n",
+      format(nrow(sig_either), big.mark=",")))
+  print(table(sig_either$sig_group))
+
+  ggplot(sig_either,
+         aes(x=beta_cases, y=beta_ctrls, color=sig_group)) +
+    geom_point(alpha=0.5, size=1.2) +
+    geom_abline(slope=1, intercept=0,
+                linetype="dashed", color="grey40") +
+    geom_hline(yintercept=0, color="grey70") +
+    geom_vline(xintercept=0, color="grey70") +
+    scale_color_manual(values=c(
+      "Both"          = "#4DAF4A",
+      "Cases only"    = "#E41A1C",
+      "Controls only" = "#377EB8"
+    )) +
+    labs(title   = "Cases vs Controls Meta-mQTL Effect Sizes",
+         subtitle= "FDR < 0.05 in at least one group",
+         x       = "β (Cases meta-analysis)",
+         y       = "β (Controls meta-analysis)",
+         color   = NULL) +
+    theme_minimal(base_size=13) +
+    theme(legend.position="bottom")
+}
+```
+
+## 5.4b Volcano Plots
+
+```{r volcano-plots, fig.width=13, fig.height=5}
+volcano_plots <- imap(meta_results, function(dat, group) {
+  if (is.null(dat) || nrow(dat) == 0) return(NULL)
+
+  # Significance thresholds
+  fdr_thresh  <- dat %>% filter(FDR_BH < 0.05) %>%
+    pull(meta_pval) %>% max(na.rm=TRUE)
+
+  dat_plot <- dat %>%
+    mutate(
+      neg_log10_p = -log10(meta_pval),
+      sig = case_when(
+        FDR_BH < 0.05 & meta_beta > 0 ~ "FDR<0.05 (positive)",
+        FDR_BH < 0.05 & meta_beta < 0 ~ "FDR<0.05 (negative)",
+        TRUE                           ~ "Not significant"
+      )
+    )
+
+  n_sig <- sum(dat_plot$sig != "Not significant", na.rm=TRUE)
+  n_pos <- sum(dat_plot$sig == "FDR<0.05 (positive)", na.rm=TRUE)
+  n_neg <- sum(dat_plot$sig == "FDR<0.05 (negative)", na.rm=TRUE)
+
+  sig_colors <- c(
+    "FDR<0.05 (positive)" = "#E41A1C",
+    "FDR<0.05 (negative)" = "#377EB8",
+    "Not significant"     = "grey70"
+  )
+
+  ggplot(dat_plot, aes(x=meta_beta, y=neg_log10_p, color=sig)) +
+    geom_point(size=0.7, alpha=0.5) +
+    geom_hline(yintercept=-log10(fdr_thresh),
+               linetype="dashed", color="grey30", linewidth=0.5) +
+    geom_vline(xintercept=0,
+               linetype="dashed", color="grey30", linewidth=0.5) +
+    scale_color_manual(values=sig_colors) +
+    annotate("text", x=Inf, y=-log10(fdr_thresh),
+             label="FDR=0.05", hjust=1.1, vjust=-0.5,
+             size=3, color="grey30") +
+    annotate("text", x=Inf, y=Inf,
+             label=sprintf("FDR<0.05: %s\n(+) %s  (–) %s",
+                           format(n_sig, big.mark=","),
+                           format(n_pos, big.mark=","),
+                           format(n_neg, big.mark=",")),
+             hjust=1.05, vjust=1.3, size=3.2, color="grey20") +
+    labs(
+      title    = sprintf("%s Meta-Analysis Volcano Plot",
+                         str_to_title(group)),
+      subtitle = sprintf("%s total pairs",
+                         format(nrow(dat), big.mark=",")),
+      x        = "Meta-analysis β (effect size)",
+      y        = "-log₁₀(p)",
+      color    = NULL
+    ) +
+    theme_minimal(base_size=12) +
+    theme(legend.position="bottom",
+          legend.text=element_text(size=9))
+})
+
+volcano_plots <- Filter(Negate(is.null), volcano_plots)
+if (length(volcano_plots) > 0)
+  wrap_plots(volcano_plots, ncol=2) +
+    plot_annotation(
+      title = "Volcano Plots — Meta-Analysis Results",
+      theme = theme(plot.title=element_text(size=15, face="bold"))
+    )
+```
+
+## 5.5 Heterogeneity Summary
+
+```{r heterogeneity}
+for (group in names(meta_results)) {
+  dat <- meta_results[[group]]
+  if (is.null(dat)) next
+
+  sig <- dat %>% filter(FDR_BH < 0.05)
+  if (nrow(sig) == 0) next
+
+  cat(sprintf("\n%s — heterogeneity among FDR<0.05 hits:\n",
+      str_to_title(group)))
+  cat(sprintf("  Median I²:              %.1f%%\n",
+      median(sig$I2,    na.rm=TRUE)))
+  cat(sprintf("  %% with Q p<0.05:       %.1f%%\n",
+      100 * mean(sig$Q_pval < 0.05, na.rm=TRUE)))
+  cat(sprintf("  %% with I² > 50%%:       %.1f%%\n",
+      100 * mean(sig$I2 > 50, na.rm=TRUE)))
+
+  # I² distribution plot
+  p <- ggplot(sig, aes(x=I2)) +
+    geom_histogram(bins=40, fill="steelblue", color="white") +
+    geom_vline(xintercept=c(25,50,75),
+               linetype="dashed", color="firebrick", alpha=0.6) +
+    annotate("text", x=c(25,50,75), y=Inf,
+             label=c("Low","Moderate","High"),
+             vjust=2, hjust=-0.1, size=3, color="firebrick") +
+    labs(title   = sprintf("%s: I² Distribution (FDR<0.05 hits)",
+                            str_to_title(group)),
+         x="I² (%)", y="Count") +
+    theme_minimal(base_size=12)
+  print(p)
+}
+```
+
+---
+
+# 6. Save Significant Results
+
+```{r save-results}
+for (group in names(meta_results)) {
+  dat <- meta_results[[group]]
+  if (is.null(dat)) next
+
+  sig <- dat %>% filter(FDR_BH < 0.05)
+  out <- file.path(META_DIR,
+                    paste0(group, "_sig_fdr05.csv"))
+  write.csv(sig, out, row.names=FALSE, quote=FALSE)
+  cat(sprintf("%s: %s significant pairs (FDR<0.05) saved to %s\n",
+      str_to_title(group),
+      format(nrow(sig), big.mark=","),
+      basename(out)))
+}
+```
+
+---
+
+# 7. Session Info
+
+```{r session-info}
+sessionInfo()
+```

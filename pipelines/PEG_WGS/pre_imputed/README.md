@@ -1,0 +1,112 @@
+# PEG Genotype Imputation Pre-Processing Pipeline
+
+Prepares `PEG_PD.phased.vcf.gz` for upload to the
+[Michigan Imputation Server (legacy)](https://imputationserver.sph.umich.edu)
+with the **HRC r1.1 2016** reference panel.
+
+## Reference Panel
+
+| Panel | Server | Build | Samples | Sites |
+|---|---|---|---|---|
+| HRC r1.1 2016 | Michigan Imputation Server | GRCh37/hg19 | 32,470 | 39,635,008 |
+
+HRC was selected over TOPMed r2 because:
+- PEG genotypes are on GRCh37/hg19, matching HRC natively (no liftover required)
+- PPMI WGS data is also on hg19 — a common coordinate system is required for mQTL meta-analysis
+- PEG cohort is ~85% Caucasian (508/581 samples), for which HRC provides excellent haplotype resolution
+- A double liftover (hg19→hg38→imputation→hg38→hg19) would compound variant loss and is not justified
+
+TOPMed r2 (GRCh38) is available on Michigan Imputation Server 2 (MIS2) at
+https://imputationserver2.sph.umich.edu and could be used in a future pass
+if a liftover workflow is implemented.
+
+## Pipeline Overview
+
+```
+PEG_PD.phased.vcf.gz
+    │
+    ├─ Step 1: qc_filter        site QC (MAF ≥ 0.01, missingness ≤ 5%, biallelic SNPs only)
+    ├─ Step 2: split_by_chrom   one VCF per chromosome (Michigan requirement)
+    ├─ Step 3: normalize_chrom  left-align, sort
+    ├─ Step 4: prepare_upload   fix missing GTs, final bgzip + tabix
+    └─ Step 5: qc_report        per-chromosome counts + upload checklist
+```
+
+## Setup
+
+```bash
+conda create -n snakemake -c conda-forge -c bioconda snakemake
+conda activate snakemake
+```
+
+Edit `config.yaml` to verify paths are correct:
+```yaml
+vcf:       "../../../Downloads/PEG_WGS/pre_imputed/PEG_PD.phased.vcf.gz"
+ref_fasta: "../../../Downloads/PPMI_WGS/resources/hg19.fa"
+```
+
+## Run
+
+```bash
+# Dry run first
+snakemake --use-conda --cores 1 --dry-run
+
+# Full run
+snakemake --use-conda --cores 4
+```
+
+## Pre-processing Output
+
+```
+results/
+├── qc/
+│   ├── peg_qc.vcf.gz              full VCF after site QC
+│   ├── chr{1..22}.stats           bcftools stats per chromosome
+│   └── imputation_qc_report.txt   summary report
+├── by_chrom/                      intermediate per-chrom VCFs
+├── normalized/                    left-aligned per-chrom VCFs
+└── upload/
+    ├── chr1.vcf.gz                ← files uploaded to Michigan Imputation Server
+    ├── chr1.vcf.gz.tbi
+    ...
+    └── chr22.vcf.gz.tbi
+```
+
+## Imputation Output
+
+Results returned from the Michigan Imputation Server are stored under `imputed/`
+as per-chromosome zip archives:
+
+```
+imputed/
+├── chr_1.zip
+├── chr_2.zip
+...
+└── chr_22.zip
+```
+
+Each zip contains:
+- `chr{N}.dose.vcf.gz` — imputed dosages (`DS` field) and haplotype dosages (`HDS` field)
+- `chr{N}.dose.vcf.gz.tbi` — tabix index
+- `chr{N}.info.gz` — per-variant imputation quality metrics (Rsq, MAF, etc.)
+
+## Post-Imputation Steps (Next)
+
+Before using imputed genotypes in the PEG mQTL pipeline:
+
+1. **Unzip** per-chromosome archives
+2. **Filter by Rsq** — retain variants with imputation quality Rsq ≥ 0.3 (or ≥ 0.8 for high-confidence only)
+3. **Concatenate chromosomes** — merge into a single VCF with `bcftools concat`
+4. **Convert dosages** — extract `DS` field for use in MatrixEQTL (expects numeric dosage 0–2)
+5. **Re-run PEG mQTL pipeline** with imputed genotypes
+6. **Re-run meta-analysis** — SNP-CpG intersection should increase substantially vs raw 450K array coverage
+
+## Michigan Imputation Server Settings Used
+
+| Setting | Value |
+|---|---|
+| Reference Panel | HRC r1.1 2016 |
+| Build | GRCh37/hg19 |
+| Population | EUR |
+| Phasing | Pre-phased (Eagle phasing already applied) |
+| Mode | Quality Control & Imputation |

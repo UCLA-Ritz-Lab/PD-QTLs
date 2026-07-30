@@ -1,0 +1,15 @@
+name: sesame_env
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - r-base=4.3
+  - bioconductor-sesame=1.20.0
+  - bioconductor-sesamedata=1.20.0
+  - bioconductor-epidish=2.18.0
+  - bioconductor-minfi=1.48.0
+  - bioconductor-biocparallel
+  - r-tidyverse
+  - r-data.table
+  - r-optparse

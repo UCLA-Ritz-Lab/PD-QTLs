@@ -1,0 +1,64 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# PEG mQTL Pipeline Configuration
+# PEG methylation + genotypes → stratified mQTLs → meta-analysis
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Input data paths (relative to pipeline directory) ─────────────────────────
+data:
+  meth_peg1:        "../../Downloads/PEG_450K/datMethPEG1t.RData"
+  meth_peg2:        "../../Downloads/PEG_450K/datMethPEG2t.RData"
+  sentrix_map_peg1: "../../Downloads/PEG_450K/sample_sentrix_mapping_peg1.csv"
+  sentrix_map_peg2: "../../Downloads/PEG_450K/sample_sentrix_mapping_peg2.csv"
+  covar_peg1:       "../../Downloads/PEG_covariates/covariates_peg1.csv"
+  covar_peg2:       "../../Downloads/PEG_covariates/covariates_peg2.csv"
+  gwas_linkage:     "../../Downloads/PEG_WGS/gwas_linkage.csv"
+  vcf:              "../../results/PEG_WGS/post_imputed/peg_imputed_filtered.dose.vcf.gz"
+
+# Output directory
+out_dir: "../../results/PEG_MQTL"
+
+# ── Datasets to process ────────────────────────────────────────────────────────
+datasets:
+  peg1_cases:
+    label:      "PEG1 Cases"
+    wave:       "PEG1"
+    case_group: "cases"
+  peg1_controls:
+    label:      "PEG1 Controls"
+    wave:       "PEG1"
+    case_group: "controls"
+  peg2_cases:
+    label:      "PEG2 Cases"
+    wave:       "PEG2"
+    case_group: "cases"
+
+# ── Probe filtering ────────────────────────────────────────────────────────────
+filters:
+  min_sd:           0.02
+  max_na_fraction:  0.00
+
+# ── MatrixEQTL settings ────────────────────────────────────────────────────────
+matrixeqtl:
+  cis_dist:         1000000
+  pval_cis:         1e-3    # relaxed from 1e-5 to improve meta-analysis overlap
+                            # FDR correction applied at meta-analysis stage
+  pval_trans:       1e-20   # effectively disabled — insufficient power for trans
+                            # in individual cohorts; revisit with larger N
+  model:            "linear"
+
+# ── Imputation quality filter ─────────────────────────────────────────────────
+imputation:
+  min_r2:  0.8
+  min_maf: 0.05
+
+# ── PLINK2 QC filters for genotype subsetting ─────────────────────────────────
+plink:
+  maf:   0.05
+  geno:  0.05
+  mind:  0.10
+  hwe:   1e-6
+
+# ── Compute resources ──────────────────────────────────────────────────────────
+resources:
+  threads_r:     1
+  threads_plink: 1
