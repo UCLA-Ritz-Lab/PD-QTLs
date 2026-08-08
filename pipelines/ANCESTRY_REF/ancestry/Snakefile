@@ -1,0 +1,654 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# 1000 Genomes-anchored ancestry PC projection: PPMI + PEG
+#
+# Computes principal components in the 1000 Genomes phase 3 reference ONLY,
+# then projects each cohort into that fixed space. This is deliberately not a
+# joint PCA over the merged samples:
+#
+#   * PPMI is WGS, PEG is SNP array. A joint PCA lets that platform
+#     difference — different ascertainment, different missingness, different
+#     error modes — load directly onto the top PCs, which is exactly what you
+#     do not want in a covariate meant to capture ancestry.
+#   * With projection, the axes are fixed by 2504 reference samples and
+#     neither cohort can move them. PPMI and PEG PCs then live in the same
+#     coordinate system and are directly comparable to each other, which is
+#     what the cross-cohort meta-analysis in META_MQTL needs.
+#
+# The reference itself is projected through the same weights, so the plotted
+# background and the cohorts all sit on one common scale.
+#
+# Build: GRCh37 / hg19, bare contig naming (1, not chr1) throughout.
+#
+# The read-level work in ../ngs_exercise/ is a separate learning exercise on
+# GRCh38 and feeds nothing here.
+# ──────────────────────────────────────────────────────────────────────────────
+
+configfile: "config.yaml"
+
+OUT      = config["out_dir"]
+CHROMS   = config["chromosomes"]
+KGP      = config["kgp"]
+SNPSET   = config["snp_set"]
+PCA      = config["pca"]
+COHORTS  = config["cohorts"]
+REF      = config["ref_fasta"]
+RES      = config["resources"]
+
+# plink2 rejects --indep-pairwise outright if the window-increment is not 1 when
+# the window is given in kb. Catch it here rather than 20 minutes into a run.
+if SNPSET["ld_prune"]["step"] != 1:
+    raise WorkflowError(
+        "snp_set.ld_prune.step must be 1 because window_kb is in kilobase units "
+        f"(got {SNPSET['ld_prune']['step']}). plink2 only accepts a >1 increment "
+        "when the window is counted in variants, not kb."
+    )
+
+N_PCS      = PCA["n_pcs"]
+N_PCS_COV  = PCA["n_pcs_covariates"]
+
+# plink2's --score wants a 1-based column range. The .eigenvec.allele file
+# produced by `--pca allele-wts` is:  #CHROM ID REF ALT A1 PC1 ... PCn
+# so PC1 is column 6 and PCn is column 5 + N_PCS.
+SCORE_COL_FIRST = 6
+SCORE_COL_LAST  = 5 + N_PCS
+
+# Every dataset gets variant IDs rewritten to CHROM:POS:REF:ALT so that an
+# exact ID match also guarantees the alleles agree. REF/ALT-swapped variants
+# simply fail to match and are dropped rather than silently merged backwards.
+ID_TEMPLATE = "@:#:$r:$a"
+
+# Cohort directories/prefixes are lowercased ("PPMI" -> ppmi/ppmi.pgen) so the
+# genotype and projection rules stay generic over both cohorts.
+COHORT_LC  = {c: c.lower() for c in COHORTS}
+LC2COHORT  = {v: k for k, v in COHORT_LC.items()}
+
+wildcard_constraints:
+    chrom     = "|".join(CHROMS),
+    cohort    = "|".join(COHORTS.keys()),
+    cohort_lc = "|".join(COHORT_LC.values()),
+
+
+def cohort_cfg(cohort_lc):
+    return COHORTS[LC2COHORT[cohort_lc]]
+
+
+rule all:
+    input:
+        expand(f"{OUT}/covariates/ancestry_pcs_{{cohort}}.csv", cohort=COHORTS.keys()),
+        f"{OUT}/ancestry_pcs_all.csv",
+        f"{OUT}/plots/ancestry_pca_cohorts.png",
+        f"{OUT}/plots/ancestry_pca_facets.png",
+        f"{OUT}/plots/ancestry_scree.png",
+        f"{OUT}/qc/snp_set_summary.txt",
+        f"{OUT}/qc/self_report_vs_pca.txt",
+        f"{OUT}/qc/projection_check.txt",
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 1. Fetch the 1000 Genomes phase 3 reference
+# ══════════════════════════════════════════════════════════════════════════════
+
+rule fetch_kgp_panel:
+    output:
+        f"{OUT}/resources/kgp/panel.txt"
+    params:
+        url = f"{KGP['base_url']}/{KGP['panel_file']}"
+    shell:
+        r"""
+        mkdir -p $(dirname {output})
+        curl -fsSL --retry 5 --retry-delay 10 -o {output} "{params.url}"
+        # Schema check: sample / pop / super_pop / gender, tab-delimited.
+        head -1 {output} | grep -q 'super_pop' \
+          || {{ echo "ERROR: panel file lacks a super_pop column: {params.url}" >&2; exit 1; }}
+        """
+
+
+rule fetch_kgp_vcf:
+    output:
+        vcf = temp(f"{OUT}/resources/kgp/chr{{chrom}}.vcf.gz"),
+        tbi = temp(f"{OUT}/resources/kgp/chr{{chrom}}.vcf.gz.tbi"),
+    params:
+        url = lambda w: f"{KGP['base_url']}/{KGP['vcf_template'].format(chrom=w.chrom)}"
+    conda: "envs/genotools.yaml"   # for bgzip/tabix verification below
+    shell:
+        r"""
+        mkdir -p $(dirname {output.vcf})
+
+        # Download to a temp name and only move into place once verified.
+        #
+        # Without the bgzip check a truncated transfer counts as a successful
+        # job: Snakemake records the output as complete, temp() keeps it around
+        # for downstream rules, and the corruption only surfaces much later as
+        # plink2's "Malformed BGZF block" — by which point the rule that caused
+        # it looks fine. These are ~1 GB files over a public FTP mirror, so
+        # partial transfers are a when-not-if. --speed-limit aborts a stalled
+        # connection instead of hanging on it, and the verify runs on every
+        # attempt so `snakemake --retries N` can actually recover.
+        fetch() {{
+            curl -fsSL --retry 5 --retry-delay 10 --retry-all-errors \
+                 --speed-limit 1024 --speed-time 120 -o "$1" "$2"
+        }}
+
+        fetch {output.vcf}.part "{params.url}"
+        fetch {output.tbi}.part "{params.url}.tbi"
+
+        bgzip -t {output.vcf}.part \
+          || {{ echo "ERROR: chr{wildcards.chrom} VCF failed BGZF integrity check (truncated or corrupt download)" >&2; exit 1; }}
+
+        mv {output.vcf}.part {output.vcf}
+        mv {output.tbi}.part {output.tbi}
+
+        # Index must actually open against the VCF it ships with.
+        tabix -l {output.vcf} > /dev/null \
+          || {{ echo "ERROR: chr{wildcards.chrom} .tbi does not read against its VCF" >&2; exit 1; }}
+        """
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 2. Reference -> PLINK2, common biallelic SNPs only
+# ══════════════════════════════════════════════════════════════════════════════
+
+rule kgp_pgen:
+    """Per-chromosome VCF -> pgen, filtered down to common clean biallelic SNPs.
+
+    Filtering this aggressively here (rather than after merging) keeps the
+    merge cheap: phase 3 carries ~85M variants genome-wide, of which only
+    ~7-8M survive MAF >= 0.05.
+    """
+    input:
+        vcf = f"{OUT}/resources/kgp/chr{{chrom}}.vcf.gz",
+        tbi = f"{OUT}/resources/kgp/chr{{chrom}}.vcf.gz.tbi",
+    output:
+        multiext(f"{OUT}/kgp/chr{{chrom}}", ".pgen", ".pvar", ".psam")
+    params:
+        prefix = f"{OUT}/kgp/chr{{chrom}}",
+        maf    = SNPSET["maf"],
+        geno   = SNPSET["max_missing"],
+        idt    = ID_TEMPLATE,
+    threads: RES["threads_plink"]
+    resources:
+        mem_mb = RES["mem_mb_plink"]
+    conda: "envs/genotools.yaml"
+    log:
+        f"{OUT}/logs/kgp_pgen_chr{{chrom}}.log"
+    shell:
+        r"""
+        mkdir -p $(dirname {params.prefix}) $(dirname {log})
+        plink2 --vcf {input.vcf} \
+            --snps-only just-acgt \
+            --max-alleles 2 \
+            --set-all-var-ids '{params.idt}' \
+            --new-id-max-allele-len 100 missing \
+            --rm-dup exclude-all \
+            --maf {params.maf} \
+            --geno {params.geno} \
+            --threads {threads} --memory {resources.mem_mb} \
+            --make-pgen --out {params.prefix} > {log} 2>&1
+        """
+
+
+rule kgp_merge:
+    input:
+        expand(f"{OUT}/kgp/chr{{chrom}}.pgen", chrom=CHROMS),
+        expand(f"{OUT}/kgp/chr{{chrom}}.pvar", chrom=CHROMS),
+        expand(f"{OUT}/kgp/chr{{chrom}}.psam", chrom=CHROMS),
+    output:
+        multiext(f"{OUT}/kgp/all_chroms", ".pgen", ".pvar", ".psam")
+    params:
+        prefix   = f"{OUT}/kgp/all_chroms",
+        listfile = f"{OUT}/kgp/merge_list.txt",
+        chroms   = " ".join(CHROMS),
+        dirn     = f"{OUT}/kgp",
+    threads: RES["threads_plink"]
+    resources:
+        mem_mb = RES["mem_mb_plink"]
+    conda: "envs/genotools.yaml"
+    log:
+        f"{OUT}/logs/kgp_merge.log"
+    shell:
+        r"""
+        : > {params.listfile}
+        for c in {params.chroms}; do echo "{params.dirn}/chr$c" >> {params.listfile}; done
+        plink2 --pmerge-list {params.listfile} pfile \
+            --threads {threads} --memory {resources.mem_mb} \
+            --make-pgen --out {params.prefix} > {log} 2>&1
+        """
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 3. Cohorts -> PLINK2, same variant-ID convention
+# ══════════════════════════════════════════════════════════════════════════════
+
+def cohort_keep_inputs(w):
+    cfg = cohort_cfg(w.cohort_lc)
+    ins = {"vcf": cfg["path"], "cov": cfg["keep_samples_from"]}
+    if "keep_samples_linkage" in cfg:
+        ins["linkage"] = cfg["keep_samples_linkage"]["file"]
+    return ins
+
+
+def cohort_keep_link_args(w):
+    """Linkage flags for scripts/cohort_keep_list.sh, empty if the cohort's
+    covariate IDs are already VCF sample IDs."""
+    lk = cohort_cfg(w.cohort_lc).get("keep_samples_linkage")
+    if not lk:
+        return ""
+    args = (f"--linkage {lk['file']}"
+            f" --link-from {lk['from_column']}"
+            f" --link-to {lk['to_column']}")
+    if lk.get("drop_dup_column"):
+        args += f" --link-dup-column {lk['drop_dup_column']}"
+    return args
+
+
+rule cohort_keep_list:
+    """Only cohorts declaring `keep_samples_from` need this. PEG's VCF carries
+    1840 samples against a 760-sample cohort; the extras are additional phasing
+    haplotypes and must not enter the PCA.
+
+    Also emits the vcf_id -> cohort_id map, because the keep-list is in VCF-ID
+    space while covariate files are in cohort-ID space, and ancestry_report has
+    to join across the two. See scripts/cohort_keep_list.sh."""
+    input:
+        unpack(cohort_keep_inputs)
+    output:
+        keep  = f"{OUT}/{{cohort_lc}}/keep_samples.txt",
+        idmap = f"{OUT}/{{cohort_lc}}/id_map.csv",
+        rpt   = f"{OUT}/qc/{{cohort_lc}}_sample_selection.txt",
+    params:
+        cov_col   = lambda w: cohort_cfg(w.cohort_lc)["keep_samples_column"],
+        link_args = cohort_keep_link_args,
+    conda: "envs/genotools.yaml"
+    shell:
+        r"""
+        bash scripts/cohort_keep_list.sh \
+            --cohort {wildcards.cohort_lc} \
+            --vcf {input.vcf} \
+            --cov {input.cov} \
+            --cov-column {params.cov_col} \
+            {params.link_args} \
+            --keep {output.keep} \
+            --id-map {output.idmap} \
+            --report {output.rpt}
+        """
+
+
+def cohort_pgen_inputs(w):
+    cfg = cohort_cfg(w.cohort_lc)
+    ins = {"vcf": cfg["path"], "ref": REF}
+    if "keep_samples_from" in cfg:
+        ins["keep"] = f"{OUT}/{w.cohort_lc}/keep_samples.txt"
+    return ins
+
+
+rule cohort_pgen:
+    """Cohort VCF -> pgen on the shared variant-ID convention.
+
+    `bcftools norm -c s -f <ref>` is the important step: it forces REF to
+    match the reference genome and swaps genotypes where REF/ALT were stored
+    the other way round. Without it the CHROM:POS:REF:ALT IDs would not line
+    up against 1000G for any swapped site, and those sites would be silently
+    dropped as non-matching rather than used. PPMI's VCFs were already
+    normalised against this same FASTA upstream, so for them this is a
+    no-op assertion; PEG is array data where swaps are common.
+
+    Chromosomes are selected with `-t`, not `-r`: `-r` seeks via the VCF's
+    index and the PEG VCF ships without one. Since we ask for all 22 autosomes
+    there is nothing to seek past anyway, so streaming costs us nothing and
+    removes the dependency on an index we do not control (the cohort VCFs live
+    under Downloads/ as read-only source data).
+    """
+    input:
+        unpack(cohort_pgen_inputs)
+    output:
+        multiext(f"{OUT}/{{cohort_lc}}/{{cohort_lc}}", ".pgen", ".pvar", ".psam")
+    params:
+        prefix = f"{OUT}/{{cohort_lc}}/{{cohort_lc}}",
+        geno   = SNPSET["max_missing"],
+        idt    = ID_TEMPLATE,
+        chroms = ",".join(CHROMS),
+        keep   = lambda w, input: f"-S {input.keep} --force-samples" if hasattr(input, "keep") else "",
+    threads: RES["threads_plink"]
+    resources:
+        mem_mb = RES["mem_mb_plink"]
+    conda: "envs/genotools.yaml"
+    log:
+        f"{OUT}/logs/{{cohort_lc}}_pgen.log"
+    shell:
+        r"""
+        mkdir -p $(dirname {params.prefix}) $(dirname {log})
+        exec > {log} 2>&1
+        bcftools view {params.keep} -t {params.chroms} {input.vcf} -Ou \
+          | bcftools norm -m -any -Ou \
+          | bcftools norm -f {input.ref} -c s -Oz -o {params.prefix}.norm.vcf.gz
+        bcftools index -t {params.prefix}.norm.vcf.gz
+
+        plink2 --vcf {params.prefix}.norm.vcf.gz \
+            --snps-only just-acgt \
+            --max-alleles 2 \
+            --set-all-var-ids '{params.idt}' \
+            --new-id-max-allele-len 100 missing \
+            --rm-dup exclude-all \
+            --geno {params.geno} \
+            --threads {threads} --memory {resources.mem_mb} \
+            --make-pgen --out {params.prefix}
+        rm -f {params.prefix}.norm.vcf.gz {params.prefix}.norm.vcf.gz.tbi
+        """
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 4. Build the shared, unambiguous, LD-pruned reference SNP set
+# ══════════════════════════════════════════════════════════════════════════════
+
+rule shared_snps:
+    """Variants present in the reference AND every cohort with identical
+    CHROM:POS:REF:ALT.
+
+    Requiring presence in *both* cohorts (not just each cohort against the
+    reference separately) is deliberate: it means PPMI and PEG are projected
+    on the exact same set of SNPs, so their PCs are comparable without any
+    further rescaling. The cost is that the SNP set is capped by PEG's array
+    content, which is much sparser than PPMI's WGS.
+    """
+    input:
+        kgp     = f"{OUT}/kgp/all_chroms.pvar",
+        cohorts = expand(f"{OUT}/{{cohort_lc}}/{{cohort_lc}}.pvar",
+                         cohort_lc=COHORT_LC.values()),
+    output:
+        ids = f"{OUT}/snpset/shared_ids.txt",
+        rpt = f"{OUT}/qc/snp_set_summary.txt",
+    params:
+        drop_ambiguous = int(bool(SNPSET["drop_ambiguous"])),
+        names          = " ".join(COHORT_LC.values()),
+    shell:
+        r"""
+        mkdir -p $(dirname {output.ids}) $(dirname {output.rpt})
+        ids () {{ awk '!/^#/ {{print $3}}' "$1" | sort -u; }}
+
+        tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+        ids {input.kgp} > "$tmp/acc"
+        cp "$tmp/acc" "$tmp/kgp"
+
+        : > {output.rpt}
+        echo "Shared SNP set (CHROM:POS:REF:ALT exact match)" >> {output.rpt}
+        printf "  %-26s: %s\n" "1000G phase 3 common" "$(wc -l < "$tmp/kgp")" >> {output.rpt}
+
+        for pv in {input.cohorts}; do
+          nm=$(basename "$pv" .pvar)
+          ids "$pv" > "$tmp/$nm"
+          printf "  %-26s: %s\n" "$nm" "$(wc -l < "$tmp/$nm")" >> {output.rpt}
+          comm -12 "$tmp/acc" "$tmp/$nm" > "$tmp/acc.new" && mv "$tmp/acc.new" "$tmp/acc"
+        done
+        printf "  %-26s: %s\n" "shared across all" "$(wc -l < "$tmp/acc")" >> {output.rpt}
+
+        # Strand-ambiguous SNPs (A/T, C/G) cannot be checked by allele
+        # matching — a strand flip leaves the alleles looking identical while
+        # inverting the allele frequency, which then loads onto the top PCs.
+        if [ "{params.drop_ambiguous}" = "1" ]; then
+          awk -F: '
+            {{
+              r=$(NF-1); a=$NF;
+              if ((r=="A"&&a=="T")||(r=="T"&&a=="A")||(r=="C"&&a=="G")||(r=="G"&&a=="C")) namb++;
+              else print $0
+            }}
+            END {{ printf "  %-26s: %d\n", "strand-ambiguous dropped", namb+0 > "/dev/stderr" }}' \
+            "$tmp/acc" > {output.ids} 2>> {output.rpt}
+        else
+          cp "$tmp/acc" {output.ids}
+          printf "  %-26s: 0 (disabled)\n" "strand-ambiguous dropped" >> {output.rpt}
+        fi
+
+        printf "  %-26s: %s\n" "-> carried into pruning" "$(wc -l < {output.ids})" >> {output.rpt}
+        cat {output.rpt}
+        test -s {output.ids} || {{ echo "ERROR: shared SNP set is empty" >&2; exit 1; }}
+        """
+
+
+rule prune_snps:
+    """LD-prune the shared SNP set in the 1000G reference.
+
+    The window is in kilobases, and plink2 requires the window-increment to be
+    exactly 1 for kb-unit windows (it advances variant-by-variant rather than in
+    blocks — a >1 increment is only meaningful when the window is itself counted
+    in variants). Passing anything else is a hard error, so `ld_prune.step` in
+    the config is asserted rather than interpolated blindly.
+    """
+    input:
+        pgen = f"{OUT}/kgp/all_chroms.pgen",
+        pvar = f"{OUT}/kgp/all_chroms.pvar",
+        psam = f"{OUT}/kgp/all_chroms.psam",
+        ids  = f"{OUT}/snpset/shared_ids.txt",
+        bed  = SNPSET["exclude_regions_bed"],
+    output:
+        prune_in = f"{OUT}/snpset/pruned.prune.in"
+    params:
+        inprefix = f"{OUT}/kgp/all_chroms",
+        prefix   = f"{OUT}/snpset/pruned",
+        win      = SNPSET["ld_prune"]["window_kb"],
+        step     = SNPSET["ld_prune"]["step"],
+        r2       = SNPSET["ld_prune"]["r2"],
+    threads: RES["threads_plink"]
+    resources:
+        mem_mb = RES["mem_mb_plink"]
+    conda: "envs/genotools.yaml"
+    log:
+        f"{OUT}/logs/prune_snps.log"
+    shell:
+        r"""
+        mkdir -p $(dirname {params.prefix}) $(dirname {log})
+        # plink2 will not parse the '#' comment lines in the BED file.
+        grep -v '^#' {input.bed} | sed '/^$/d' > {params.prefix}.exclude.bed
+        plink2 --pfile {params.inprefix} \
+            --extract {input.ids} \
+            --exclude bed0 {params.prefix}.exclude.bed \
+            --indep-pairwise {params.win}kb {params.step} {params.r2} \
+            --threads {threads} --memory {resources.mem_mb} \
+            --out {params.prefix} > {log} 2>&1
+        echo "LD-pruned reference SNPs: $(wc -l < {output.prune_in})" | tee -a {log}
+        """
+
+
+rule kgp_pruned_pfile:
+    input:
+        pgen     = f"{OUT}/kgp/all_chroms.pgen",
+        pvar     = f"{OUT}/kgp/all_chroms.pvar",
+        psam     = f"{OUT}/kgp/all_chroms.psam",
+        prune_in = f"{OUT}/snpset/pruned.prune.in",
+    output:
+        multiext(f"{OUT}/snpset/kgp_pruned", ".pgen", ".pvar", ".psam")
+    params:
+        inprefix = f"{OUT}/kgp/all_chroms",
+        prefix   = f"{OUT}/snpset/kgp_pruned",
+    threads: RES["threads_plink"]
+    resources:
+        mem_mb = RES["mem_mb_plink"]
+    conda: "envs/genotools.yaml"
+    log:
+        f"{OUT}/logs/kgp_pruned_pfile.log"
+    shell:
+        r"""
+        plink2 --pfile {params.inprefix} --extract {input.prune_in} \
+            --threads {threads} --memory {resources.mem_mb} \
+            --make-pgen --out {params.prefix} > {log} 2>&1
+        """
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 5. PCA in the reference, then project everything through the same weights
+# ══════════════════════════════════════════════════════════════════════════════
+
+rule reference_pca:
+    """PCs are computed from the 2504 reference samples alone. Allele weights
+    (`--pca allele-wts`) are what makes projection possible; the .acount file
+    supplies the reference allele frequencies used to standardise every
+    projected genotype, so cohort-specific frequencies never enter."""
+    input:
+        multiext(f"{OUT}/snpset/kgp_pruned", ".pgen", ".pvar", ".psam")
+    output:
+        allele = f"{OUT}/pca/ref_pca.eigenvec.allele",
+        eigval = f"{OUT}/pca/ref_pca.eigenval",
+        eigvec = f"{OUT}/pca/ref_pca.eigenvec",
+        acount = f"{OUT}/pca/ref_pca.acount",
+    params:
+        inprefix = f"{OUT}/snpset/kgp_pruned",
+        prefix   = f"{OUT}/pca/ref_pca",
+        npcs     = N_PCS,
+    threads: RES["threads_plink"]
+    resources:
+        mem_mb = RES["mem_mb_plink"]
+    conda: "envs/genotools.yaml"
+    log:
+        f"{OUT}/logs/reference_pca.log"
+    shell:
+        r"""
+        mkdir -p $(dirname {params.prefix}) $(dirname {log})
+        plink2 --pfile {params.inprefix} \
+            --freq counts \
+            --pca allele-wts {params.npcs} approx \
+            --threads {threads} --memory {resources.mem_mb} \
+            --out {params.prefix} > {log} 2>&1
+        """
+
+
+rule project_cohort:
+    """Project one cohort into the reference PC space.
+
+    `--read-freq` pins standardisation to reference allele frequencies, and
+    `no-mean-imputation` stops missing genotypes from being quietly filled
+    with the reference mean — that would drag samples toward the origin and
+    fake a 'more admixed' result for whichever cohort is patchier.
+    """
+    input:
+        pgen   = f"{OUT}/{{cohort_lc}}/{{cohort_lc}}.pgen",
+        pvar   = f"{OUT}/{{cohort_lc}}/{{cohort_lc}}.pvar",
+        psam   = f"{OUT}/{{cohort_lc}}/{{cohort_lc}}.psam",
+        allele = f"{OUT}/pca/ref_pca.eigenvec.allele",
+        acount = f"{OUT}/pca/ref_pca.acount",
+        prune  = f"{OUT}/snpset/pruned.prune.in",
+    output:
+        f"{OUT}/pca/proj_{{cohort_lc}}.sscore"
+    params:
+        inprefix = f"{OUT}/{{cohort_lc}}/{{cohort_lc}}",
+        prefix   = f"{OUT}/pca/proj_{{cohort_lc}}",
+        first    = SCORE_COL_FIRST,
+        last     = SCORE_COL_LAST,
+    threads: RES["threads_plink"]
+    resources:
+        mem_mb = RES["mem_mb_plink"]
+    conda: "envs/genotools.yaml"
+    log:
+        f"{OUT}/logs/project_{{cohort_lc}}.log"
+    shell:
+        r"""
+        plink2 --pfile {params.inprefix} \
+            --extract {input.prune} \
+            --read-freq {input.acount} \
+            --score {input.allele} 2 5 header-read no-mean-imputation variance-standardize \
+            --score-col-nums {params.first}-{params.last} \
+            --threads {threads} --memory {resources.mem_mb} \
+            --out {params.prefix} > {log} 2>&1
+        """
+
+
+rule project_reference:
+    """The reference projected through its own weights. Puts the 1000G
+    background on the identical scale as the cohorts, so the comparison plot
+    is not mixing raw eigenvectors with shrunken projected scores. Doubles as
+    a correctness check: these should reproduce ref_pca.eigenvec up to a
+    per-PC scale factor (see qc/projection_check.txt)."""
+    input:
+        pgen   = f"{OUT}/snpset/kgp_pruned.pgen",
+        pvar   = f"{OUT}/snpset/kgp_pruned.pvar",
+        psam   = f"{OUT}/snpset/kgp_pruned.psam",
+        allele = f"{OUT}/pca/ref_pca.eigenvec.allele",
+        acount = f"{OUT}/pca/ref_pca.acount",
+    output:
+        f"{OUT}/pca/proj_kgp.sscore"
+    params:
+        inprefix = f"{OUT}/snpset/kgp_pruned",
+        prefix   = f"{OUT}/pca/proj_kgp",
+        first    = SCORE_COL_FIRST,
+        last     = SCORE_COL_LAST,
+    threads: RES["threads_plink"]
+    resources:
+        mem_mb = RES["mem_mb_plink"]
+    conda: "envs/genotools.yaml"
+    log:
+        f"{OUT}/logs/project_kgp.log"
+    shell:
+        r"""
+        plink2 --pfile {params.inprefix} \
+            --read-freq {input.acount} \
+            --score {input.allele} 2 5 header-read no-mean-imputation variance-standardize \
+            --score-col-nums {params.first}-{params.last} \
+            --threads {threads} --memory {resources.mem_mb} \
+            --out {params.prefix} > {log} 2>&1
+        """
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 6. Label, export covariates, plot
+# ══════════════════════════════════════════════════════════════════════════════
+
+rule ancestry_report:
+    input:
+        kgp        = f"{OUT}/pca/proj_kgp.sscore",
+        cohorts    = expand(f"{OUT}/pca/proj_{{cohort_lc}}.sscore",
+                            cohort_lc=COHORT_LC.values()),
+        eigval     = f"{OUT}/pca/ref_pca.eigenval",
+        eigvec     = f"{OUT}/pca/ref_pca.eigenvec",
+        panel      = f"{OUT}/resources/kgp/panel.txt",
+        selfreport = [COHORTS[c]["self_report"]["file"] for c in COHORTS],
+        # Only cohorts whose covariate IDs differ from their VCF sample IDs.
+        idmaps     = [f"{OUT}/{COHORT_LC[c]}/id_map.csv"
+                      for c in COHORTS if "keep_samples_linkage" in COHORTS[c]],
+    output:
+        all_csv   = f"{OUT}/ancestry_pcs_all.csv",
+        cov_csv   = expand(f"{OUT}/covariates/ancestry_pcs_{{cohort}}.csv",
+                           cohort=COHORTS.keys()),
+        p_cohorts = f"{OUT}/plots/ancestry_pca_cohorts.png",
+        p_facets  = f"{OUT}/plots/ancestry_pca_facets.png",
+        p_scree   = f"{OUT}/plots/ancestry_scree.png",
+        concord   = f"{OUT}/qc/self_report_vs_pca.txt",
+        projchk   = f"{OUT}/qc/projection_check.txt",
+    params:
+        # cohort spec: NAME:sscore:selfreport_csv:id_column:id_prefix
+        specs = lambda w: " ".join(
+            "--cohort {}:{}/pca/proj_{}.sscore:{}:{}:{}".format(
+                c, OUT, COHORT_LC[c],
+                COHORTS[c]["self_report"]["file"],
+                COHORTS[c]["self_report"]["id_column"],
+                COHORTS[c]["self_report"].get("id_prefix", "") or "NONE",
+            )
+            for c in COHORTS
+        ),
+        # id-map spec: NAME:csv — translates self-report IDs into VCF-ID space.
+        idmaps = lambda w: " ".join(
+            "--id-map {}:{}/{}/id_map.csv".format(c, OUT, COHORT_LC[c])
+            for c in COHORTS if "keep_samples_linkage" in COHORTS[c]
+        ),
+        outdir    = OUT,
+        n_pcs_cov = N_PCS_COV,
+    conda: "envs/r.yaml"
+    log:
+        f"{OUT}/logs/ancestry_report.log"
+    shell:
+        r"""
+        mkdir -p {params.outdir}/covariates {params.outdir}/plots {params.outdir}/qc
+        Rscript scripts/ancestry_projection.R \
+            --kgp-sscore {input.kgp} \
+            --panel {input.panel} \
+            --eigenval {input.eigval} \
+            --ref-eigenvec {input.eigvec} \
+            {params.specs} \
+            {params.idmaps} \
+            --n-pcs-cov {params.n_pcs_cov} \
+            --out-all {output.all_csv} \
+            --out-covariate-dir {params.outdir}/covariates \
+            --plot-cohorts {output.p_cohorts} \
+            --plot-facets {output.p_facets} \
+            --plot-scree {output.p_scree} \
+            --out-concordance {output.concord} \
+            --out-projection-check {output.projchk} \
+            > {log} 2>&1
+        """

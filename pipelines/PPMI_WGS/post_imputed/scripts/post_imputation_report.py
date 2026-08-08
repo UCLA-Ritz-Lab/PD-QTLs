@@ -150,7 +150,7 @@ def main():
 
     lines = [
         "=" * 60,
-        "PEG POST-IMPUTATION QC REPORT",
+        "PPMI POST-IMPUTATION QC REPORT",
         "Reference Panel : HRC r1.1 2016 (GRCh37/hg19)",
         f"Rsq filter      : >= {args.rsq_min}",
         "=" * 60,

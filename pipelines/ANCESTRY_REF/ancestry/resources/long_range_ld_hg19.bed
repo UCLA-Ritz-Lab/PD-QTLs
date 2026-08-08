@@ -1,0 +1,35 @@
+# Long-range LD regions excluded before LD pruning / PCA.
+#
+# This is the widely-circulated PLINK "high-LD regions" list (after Price et
+# al. 2008, Am J Hum Genet 83:132-135, Table 1). The coordinates as published
+# are build 36; the list below is the hg19/build 37 form that ships with most
+# PCA workflows. Boundaries are approximate by design — these are generous
+# windows meant to be over- rather than under-inclusive, so small build-
+# coordinate drift at the edges does not matter in practice.
+#
+# Bare contig naming (1, not chr1) to match the rest of this repo.
+# Format: CHROM  START  END  NAME   (0-based half-open, BED convention)
+1	48000000	52000000	hla_unrelated_1p
+2	86000000	100500000	region_2p
+2	134500000	138000000	region_2q_lct
+2	183000000	190000000	region_2q
+3	47500000	50000000	region_3p
+3	83500000	87000000	region_3p_2
+3	89000000	97500000	region_3q
+5	44500000	50500000	region_5p
+5	98000000	100500000	region_5q
+5	129000000	132000000	region_5q_2
+5	135500000	138500000	region_5q_3
+6	25000000	33500000	MHC
+6	57000000	64000000	region_6p_centromeric
+6	140000000	142500000	region_6q
+7	55000000	66000000	region_7_centromeric
+8	7000000	13000000	inversion_8p23
+8	43000000	50000000	region_8_centromeric
+8	112000000	115000000	region_8q
+10	37000000	43000000	region_10_centromeric
+11	46000000	57000000	region_11_centromeric
+11	87500000	90500000	region_11q
+12	33000000	40000000	region_12_centromeric
+12	109500000	112000000	region_12q
+20	32000000	34500000	region_20_centromeric

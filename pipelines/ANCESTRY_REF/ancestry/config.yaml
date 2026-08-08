@@ -1,0 +1,119 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# 1000 Genomes-anchored ancestry PC projection for PPMI + PEG
+# Reference build: GRCh37 / hg19, bare contig naming (1, 2, ... 22)
+#
+# Everything here runs locally — no GCP. The anchor comes from 1000 Genomes
+# phase 3's *released* genotypes, which are a far better reference than
+# anything we could call ourselves (the phase 3 BAMs are ~4x low-coverage;
+# the release is imputed/refined across all 2504 samples). The read-level
+# work in ../ngs_exercise/ is a separate, self-contained learning exercise
+# and feeds nothing here.
+# ──────────────────────────────────────────────────────────────────────────────
+
+out_dir: "../../../results/ANCESTRY_REF"
+
+# ── Reference genome (used only to canonicalise REF/ALT via bcftools norm) ────
+ref_fasta: "../../../Downloads/PPMI_WGS/resources/hg19.fa"
+
+# ── 1000 Genomes phase 3, GRCh37 ─────────────────────────────────────────────
+# VERIFIED 2026-08-07 over HTTPS (the FTP host also serves https://).
+# NOTE: autosomes are "v5b", NOT the "v5a" the old GIAB config assumed —
+# the v5a URLs 404. chrX is v1c and chrY is v2b, but we only use autosomes.
+kgp:
+  base_url: "https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20130502"
+  vcf_template: "ALL.chr{chrom}.phase3_shapeit2_mvncall_integrated_v5b.20130502.genotypes.vcf.gz"
+  panel_file: "integrated_call_samples_v3.20130502.ALL.panel"
+
+# ── Cohort inputs ────────────────────────────────────────────────────────────
+# Both cohorts are supplied as VCFs of *directly observed* genotypes. For PPMI
+# that means the pre-imputation WGS calls, and for PEG the pre-imputation array
+# calls — deliberately not either cohort's post-imputation dosages. Imputed
+# dosages are themselves imputed off a 1000G-family reference panel, so
+# projecting them onto a 1000G anchor partly circularises the analysis and
+# shrinks both cohorts artificially toward the reference.
+cohorts:
+  PPMI:
+    # Real WGS, GATK-called, bcftools-normalised against this same hg19.fa by
+    # PPMI_WGS/pre_imputed.
+    #
+    # NOTE — use merged.dedup.vcf.gz, NOT plink2/all_chroms.{pgen,psam,pvar}.
+    # That PLINK fileset (dated 2026-06-13) predates the sample-duplication
+    # fix and still carries 1788 columns: every patient twice, as
+    # "PPMISI{id}.variant" (indel callset, a near-constant 0/0 stub at SNP
+    # sites) and "PPMISI{id}.variant2" (the real SNP genotype). Running
+    # ancestry PCA on it would halve every allele frequency and put each
+    # patient in the plot twice. merged.dedup.vcf.gz is the corrected
+    # 894-patient output from the pipeline's dedup_samples step.
+    path: "../../../results/PPMI_WGS/pre_imputed/merged/merged.dedup.vcf.gz"
+    # Self-reported race/ethnicity, for comparison against the PCA result
+    # (never used to build it). PPMI records race as multi-select binary
+    # indicator columns rather than one categorical field, so a participant
+    # can be flagged in more than one — see scripts/ancestry_projection.R for
+    # how those collapse to a single label. Joins on PPMISI{PATNO}.
+    self_report:
+      file: "../../../Downloads/PPMI_covariates/Demographics_14Dec2025.csv"
+      id_column: "PATNO"
+      id_prefix: "PPMISI"
+  PEG:
+    path: "../../../Downloads/PEG_WGS/PEG_PD.phased.vcf.gz"
+    # The VCF carries 1840 samples — more than the actual PEG cohort (the
+    # extras are additional phasing haplotypes). Restrict to IDs appearing in
+    # this covariate file, which is keyed by `Pegid`.
+    keep_samples_from: "../../../Downloads/PEG_covariates/ancestry_peg.csv"
+    keep_samples_column: "Pegid"
+    # ...but the VCF's sample names are GWAS_IDs (CRG_*/CRG2_*), NOT Pegids, so
+    # the two namespaces have to be joined through this crosswalk — intersecting
+    # them directly gives the empty set. DUP=1 marks duplicate genotypings of
+    # one person; dropping them makes the join exactly 1:1 (760 of 760 PEG
+    # covariate samples resolve to a VCF sample). Same file and same DUP=0
+    # convention as PEG_MQTL/PEG_METAB use.
+    keep_samples_linkage:
+      file: "../../../Downloads/PEG_WGS/gwas_linkage.csv"
+      from_column: "Pegid"     # must match keep_samples_column above
+      to_column: "GWAS_ID"     # must match the VCF's sample names
+      drop_dup_column: "DUP"   # omit to keep duplicate-flagged rows
+    # Self-reported ancestry, plus the legacy STRUCTURE-based K1a-K4a
+    # admixture proportions these PCs are intended to replace.
+    self_report:
+      file: "../../../Downloads/PEG_covariates/ancestry_peg.csv"
+      id_column: "Pegid"
+      id_prefix: ""
+
+# ── Reference SNP-set construction ───────────────────────────────────────────
+snp_set:
+  maf: 0.05             # common variants only — PC axes should be driven by
+                        # continental frequency differences, not rare alleles
+  max_missing: 0.01     # per-variant missingness ceiling, applied in each source
+  # Drop strand-ambiguous SNPs (A/T and C/G). Their strand cannot be resolved
+  # by allele matching, and PEG is array data where a flip is entirely
+  # plausible — a flipped ambiguous SNP silently becomes an allele-frequency
+  # error that loads straight onto the top PCs.
+  drop_ambiguous: true
+  ld_prune:
+    window_kb: 200
+    # Must be 1: plink2 only accepts a window-increment > 1 when the window is
+    # counted in variants, and this window is in kb (it slides variant by
+    # variant instead). Any other value is a hard plink2 error, so the Snakefile
+    # asserts it up front.
+    step: 1
+    r2: 0.1
+  # Long-range LD / known large inversions. These regions carry so much
+  # internal LD that they produce PCs reflecting local haplotype structure
+  # rather than genome-wide ancestry (the classic chr6 MHC and chr8p23
+  # inversion artefacts).
+  exclude_regions_bed: "resources/long_range_ld_hg19.bed"
+
+# ── PCA ──────────────────────────────────────────────────────────────────────
+pca:
+  n_pcs: 20             # computed in the reference
+  n_pcs_covariates: 10  # written out as QTL covariates
+
+# ── Chromosomes (autosomes only — sex chromosomes are not used for ancestry) ──
+chromosomes: ["1","2","3","4","5","6","7","8","9","10","11","12","13","14",
+              "15","16","17","18","19","20","21","22"]
+
+# ── Compute ──────────────────────────────────────────────────────────────────
+resources:
+  threads_plink: 4
+  threads_bcftools: 4
+  mem_mb_plink: 16000
