@@ -1,0 +1,11 @@
+name: ancestry_r_env
+# No `defaults` — see envs/genotools.yaml for why.
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - r-base=4.3
+  - r-data.table
+  - r-ggplot2
+  - r-patchwork
+  - r-optparse

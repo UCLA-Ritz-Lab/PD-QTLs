@@ -1,0 +1,15 @@
+# One env for every genotype-handling rule. bcftools and plink2 are combined
+# rather than split (as PPMI_WGS splits them) because peg_pgen pipes bcftools
+# straight into plink2, and a Snakemake rule can only declare one conda env.
+name: ancestry_genotools_env
+# conda-forge first and NO `defaults`. The PPMI_WGS envs list `defaults`, but as
+# of 2026-08 that channel's c-ares/libnghttp2 are old enough that the solver
+# cannot reach any libcurl new enough for htslib 1.19, and the env is
+# unsolvable. bioconda's own recommended channel order is conda-forge, bioconda.
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - bcftools=1.19
+  - htslib=1.19
+  - plink2=2.00a5.12
