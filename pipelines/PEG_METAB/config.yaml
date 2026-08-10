@@ -13,6 +13,10 @@ data:
   covar_peg2:   "../../Downloads/PEG_covariates/covariates_peg2.csv"
   vcf:          "../../results/PEG_WGS/post_imputed/peg_imputed_filtered.dose.vcf.gz"
   gwas_linkage: "../../Downloads/PEG_WGS/gwas_linkage.csv"
+  # 1000G-anchored ancestry PCs (ANCESTRY_REF pipeline output).
+  # Keyed by IID = GWAS_ID (CRG_*/CRG2_*), joined to pegid through
+  # gwas_linkage.csv with DUP=0.
+  ancestry_pcs: "../../results/ANCESTRY_REF/covariates/ancestry_pcs_PEG.csv"
 
 # Output directory
 out_dir: "../../results/PEG_METAB"
@@ -51,6 +55,16 @@ datasets:
     case_group: "cases"
 
 # ── Feature filtering ─────────────────────────────────────────────────────────
+# ── Ancestry covariates ───────────────────────────────────────────
+# Genetic ancestry PCs REPLACE the former self-reported Ethnicity dummy
+# variables (Ethnicity_Hispanic/Asian/Black, ref=Caucasian). Self-report is a
+# coarse proxy: in the PEG ancestry QC, 25 of 124 self-reported AMR samples sit
+# nearest the EUR 1000G centroid, and a binary dummy cannot represent
+# continuous admixture at all. 5 PCs matches PEG_MQTL and PPMI_MQTL so every
+# cohort entering the meta-analysis uses the same ancestry model.
+ancestry:
+  n_pcs: 5
+
 filters:
   min_sd:          0.01   # minimum SD across samples to retain feature
   max_na_fraction: 0.20   # max missingness per feature (LOD imputation already applied)

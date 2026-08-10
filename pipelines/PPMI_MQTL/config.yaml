@@ -13,14 +13,20 @@ data:
   plink_prefix:    "../../results/PPMI_WGS/post_imputed/ppmi_imputed"
   # PPMI participant status / phenotype file
   phenotype_file:  "../../Downloads/PPMI_covariates/Participant_Status_14Dec2025.csv"
+  # 1000G-anchored ancestry PCs (ANCESTRY_REF pipeline output).
+  # Keyed by IID = PPMISI{PATNO}, matching the imputed psam sample IDs.
+  ancestry_pcs:    "../../results/ANCESTRY_REF/covariates/ancestry_pcs_PPMI.csv"
 
 # Output directory
 out_dir: "../../results/PPMI_MQTL"
 
 # ── ID transformation rules ───────────────────────────────────────────────────
 # Methylation columns:  {PATNO}_T{visit}    e.g. 10874_T1
-# PLINK2 sample IDs:    PPMISI{PATNO}.variant2  e.g. PPMISI10874.variant2
-#   (MIS preserved original VCF sample IDs; .variant2 = actual genotype data)
+# PLINK2 sample IDs:    PPMISI{PATNO}          e.g. PPMISI10874
+#   (the pre-imputation WGS pfiles used PPMISI{PATNO}.variant2, where the
+#    .variant2 suffix marked rows carrying actual genotype data; the imputation
+#    server dropped both the suffix and the non-genotype rows, so all 894
+#    samples in the imputed psam are real and no suffix filtering is needed)
 #   (psam has proper #FID column so keep files use FID IID, not 0 IID)
 # Phenotype file ID:    PATNO               e.g. 10874
 #
@@ -30,7 +36,9 @@ out_dir: "../../results/PPMI_MQTL"
 id:
   meth_visit:   1       # baseline visit number to extract (T1)
   plink_prefix: "PPMISI" # prefix in PLINK2 IDs to strip when matching PATNO
-  plink_suffix: ".variant2" # MIS preserved original VCF sample IDs incl. .variant2
+  plink_suffix: ""      # imputed psam IIDs are bare PPMISI{PATNO} — no .variant2.
+                        # The pre-imputation WGS pfiles carried a .variant2 suffix,
+                        # but the imputation server stripped it; leave empty here.
 
 # ── PPMI cohort definitions ───────────────────────────────────────────────────
 # COHORT column values in Participant_Status file
@@ -47,6 +55,15 @@ datasets:
     label:  "PPMI Healthy Controls (baseline)"
     cohort: 2
 
+# ── Ancestry covariates ───────────────────────────────────────────────────────
+# Number of ancestry PCs to include as mQTL covariates. The reference PCA
+# eigenvalues put 90.7% of variance in PC1-4 (49.9/28.1/7.4/5.3%), PC5 at 1.4%,
+# and PC6+ on a ~0.5% noise plateau — so 5 covers the elbow with one margin PC.
+# Each PC costs a residual degree of freedom, which matters for the 69-sample
+# control stratum (age + 5 cell types + 5 PCs = 11 covariates, leaving 56 df).
+ancestry:
+  n_pcs: 5
+
 # ── Probe filtering ────────────────────────────────────────────────────────────
 filters:
   min_sd:          0.02
@@ -57,8 +74,14 @@ filters:
 matrixeqtl:
   cis_dist:    1000000
   pval_cis:    1e-5    # keep current — already 3.3M pairs at this threshold
-  pval_trans:  1e-20   # effectively disabled — insufficient power for trans
-                       # in individual cohorts; revisit with larger N
+  pval_trans:  0       # trans analysis OFF — insufficient power for trans in
+                       # individual cohorts; revisit with larger N.
+                       # Must be exactly 0 to disable: MatrixEQTL computes
+                       # every SNP x CpG pair for any non-zero threshold and
+                       # only filters at write time, so 1e-20 still cost a
+                       # full ~1.6e12-test scan (~15 h for the 69-sample
+                       # cohort). At 0 the trans pass is skipped entirely and
+                       # run_mqtl.R writes a header-only trans_mqtls.txt.
   model:       "linear"
 
 # ── PLINK2 QC filters ─────────────────────────────────────────────────────────

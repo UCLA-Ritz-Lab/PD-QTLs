@@ -13,8 +13,32 @@
 
 configfile: "config.yaml"
 
-OUT          = config["out_dir"]
-DATASETS     = list(config["datasets"].keys())
+OUT = config["out_dir"]
+
+# ALL_DATASETS is every cohort defined in config; DATASETS is the subset this
+# invocation actually analyses. The two must stay distinct: prepare_datasets is
+# a single R call that writes every cohort in one pass, and extract_positions
+# reads peg1_cases/geno_keep.txt regardless of which cohort is selected — so
+# prepare_datasets always declares ALL_DATASETS as its outputs.
+ALL_DATASETS = list(config["datasets"].keys())
+DATASETS     = ALL_DATASETS
+
+# Restrict the run to a subset of cohorts:
+#   snakemake --config cohort=peg1_cases
+#   snakemake --config cohort=peg1_cases,peg2_cases
+# Intended for splitting run_mqtl across cluster jobs — one cohort per
+# submission parallelises better than one job doing all three sequentially.
+_cohort_sel = config.get("cohort")
+if _cohort_sel:
+    _sel = ([c.strip() for c in _cohort_sel.split(",")]
+            if isinstance(_cohort_sel, str) else list(_cohort_sel))
+    _unknown = [c for c in _sel if c not in ALL_DATASETS]
+    if _unknown:
+        raise WorkflowError(
+            "Unknown cohort(s) in --config cohort=: {}. Available: {}".format(
+                ", ".join(_unknown), ", ".join(ALL_DATASETS)))
+    DATASETS = _sel
+
 FILTERED_VCF = f"{OUT}/genotypes/peg_imputed_maf05_rsq08.vcf.gz"
 # ──────────────────────────────────────────────────────────────────────────────
 rule all:
@@ -81,18 +105,22 @@ rule prepare_datasets:
         covar_peg1       = config["data"]["covar_peg1"],
         covar_peg2       = config["data"]["covar_peg2"],
         gwas_linkage     = config["data"]["gwas_linkage"],
+        ancestry_pcs     = config["data"]["ancestry_pcs"],
         vcf              = FILTERED_VCF
     output:
         probe_list = f"{OUT}/datasets/retained_probes.txt",
-        # Per-dataset outputs declared as a group
+        # Per-dataset outputs declared as a group. ALL_DATASETS, not DATASETS:
+        # one R call writes every cohort, and narrowing this list would leave
+        # peg1_cases/geno_keep.txt — which extract_positions always reads —
+        # with no producing rule.
         meth_files = expand("{out}/datasets/{dataset}/methylation.csv.gz",
-                            out=OUT, dataset=DATASETS),
+                            out=OUT, dataset=ALL_DATASETS),
         covar_files = expand("{out}/datasets/{dataset}/covariates.csv",
-                             out=OUT, dataset=DATASETS),
+                             out=OUT, dataset=ALL_DATASETS),
         keep_files  = expand("{out}/datasets/{dataset}/geno_keep.txt",
-                             out=OUT, dataset=DATASETS),
+                             out=OUT, dataset=ALL_DATASETS),
         id_maps     = expand("{out}/datasets/{dataset}/id_map.csv",
-                             out=OUT, dataset=DATASETS)
+                             out=OUT, dataset=ALL_DATASETS)
     conda:
         "envs/r_mqtl.yaml"
     threads:
@@ -110,6 +138,8 @@ rule prepare_datasets:
             --covar_peg2       {input.covar_peg2} \
             --gwas_linkage     {input.gwas_linkage} \
             --vcf              {input.vcf} \
+            --ancestry_pcs     {input.ancestry_pcs} \
+            --n_pcs            {config[ancestry][n_pcs]} \
             --out_dir          {OUT} \
             --min_sd           {config[filters][min_sd]} \
             --max_na_frac      {config[filters][max_na_fraction]} \

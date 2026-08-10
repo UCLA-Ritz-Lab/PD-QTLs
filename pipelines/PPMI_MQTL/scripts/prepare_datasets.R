@@ -20,9 +20,11 @@ option_list <- list(
   make_option("--out_dir",         type="character"),
   make_option("--meth_visit",      type="integer",   default=1L),
   make_option("--plink_id_prefix", type="character", default="PPMISI"),
-  make_option("--plink_id_suffix", type="character", default=".variant2"),
+  make_option("--plink_id_suffix", type="character", default=""),
   make_option("--cohort_case",     type="integer",   default=1L),
   make_option("--cohort_control",  type="integer",   default=2L),
+  make_option("--ancestry_pcs",    type="character", default=NULL),
+  make_option("--n_pcs",           type="integer",   default=5L),
   make_option("--min_sd",          type="double",    default=0.02),
   make_option("--max_na_frac",     type="double",    default=0.05),
   make_option("--log",             type="character", default="prepare_datasets.log")
@@ -78,8 +80,10 @@ if ("IID" %in% colnames(psam_raw)) {
 
 cat(sprintf("PLINK2 samples (raw): %d\n", nrow(psam)))
 
-# Keep only .variant2 entries — these contain actual genotype data
-# .variant entries exist in psam but have no genotype information
+# Optional suffix filter. The pre-imputation WGS psam mixed ".variant2" rows
+# (real genotype data) with ".variant" rows (no genotype information), so the
+# suffix selected the usable ones. The imputed psam contains only real samples
+# with no suffix at all, so plink_id_suffix is empty and this keeps everything.
 psam_primary <- psam %>%
   filter(grepl(paste0(opt$plink_id_suffix, "$"), IID, fixed=FALSE)) %>%
   mutate(
@@ -87,7 +91,8 @@ psam_primary <- psam %>%
     PATNO = str_remove(PATNO, paste0(opt$plink_id_suffix, "$"))
   )
 
-cat(sprintf("PLINK2 samples (primary .variant2 only): %d\n", nrow(psam_primary)))
+cat(sprintf("PLINK2 samples (after suffix filter '%s'): %d\n",
+            opt$plink_id_suffix, nrow(psam_primary)))
 cat(sprintf("First 5 IID -> PATNO mappings:\n"))
 print(head(psam_primary %>% select(IID, PATNO), 5))
 
@@ -132,6 +137,29 @@ cat(sprintf("Phenotype subjects:              %d\n", nrow(pheno)))
 cat(sprintf("Three-way intersection:          %d\n", nrow(master)))
 cat(sprintf("  Cases:    %d\n", sum(master$COHORT == opt$cohort_case)))
 cat(sprintf("  Controls: %d\n", sum(master$COHORT == opt$cohort_control)))
+
+# Fail fast: an empty intersection is almost always an ID-format mismatch
+# (wrong --plink_id_prefix/--plink_id_suffix), not a genuine lack of overlap.
+# Without this the script runs to completion and writes zero-sample datasets.
+if (nrow(master) == 0) {
+  if (nrow(psam_primary) == 0) {
+    stop(sprintf(paste0(
+      "No PLINK2 samples matched suffix '%s' (%d raw samples read).\n",
+      "  Example psam IIDs: %s\n",
+      "  Check id.plink_prefix / id.plink_suffix in config.yaml."),
+      opt$plink_id_suffix, nrow(psam),
+      paste(head(psam$IID, 3), collapse=", ")))
+  }
+  stop(sprintf(paste0(
+    "Empty three-way intersection (meth=%d, plink=%d, pheno=%d).\n",
+    "  Example methylation PATNOs: %s\n",
+    "  Example PLINK2 PATNOs:      %s\n",
+    "  Example phenotype PATNOs:   %s"),
+    length(baseline_patnos), nrow(psam_primary), nrow(pheno),
+    paste(head(baseline_patnos, 3),     collapse=", "),
+    paste(head(psam_primary$PATNO, 3),  collapse=", "),
+    paste(head(pheno$PATNO, 3),         collapse=", ")))
+}
 
 # ── Step 5: Load full baseline beta matrix ────────────────────────────────────
 log_section("Step 5: Load baseline beta matrix")
@@ -198,17 +226,57 @@ cat(sprintf("Cell-type columns: %s\n",
     paste(setdiff(colnames(cell_props),
                   c("sample_col_name","PATNO")), collapse=", ")))
 
+# ── Step 7b: Load ancestry PCs ───────────────────────────────────────────────
+log_section("Step 7b: Load ancestry PCs")
+
+# 1000G-anchored PCs from the ANCESTRY_REF pipeline. Keyed by IID
+# (PPMISI{PATNO}), so join on plink_iid rather than PATNO.
+pc_cols <- character(0)
+if (!is.null(opt$ancestry_pcs) && nzchar(opt$ancestry_pcs)) {
+  anc <- read.csv(opt$ancestry_pcs, stringsAsFactors=FALSE)
+  avail <- grep("^PC[0-9]+$", colnames(anc), value=TRUE)
+  avail <- avail[order(as.integer(sub("^PC", "", avail)))]
+  if (opt$n_pcs > length(avail)) {
+    stop(sprintf("Requested %d ancestry PCs but file has only %d (%s)",
+                 opt$n_pcs, length(avail), opt$ancestry_pcs))
+  }
+  pc_cols <- head(avail, opt$n_pcs)
+
+  anc <- anc %>% select(plink_iid = IID, all_of(pc_cols))
+  cat(sprintf("Ancestry PC file: %d samples, %d PCs available, using %s\n",
+              nrow(anc), length(avail), paste(pc_cols, collapse=", ")))
+
+  n_cov <- sum(master$plink_iid %in% anc$plink_iid)
+  cat(sprintf("Samples with ancestry PCs: %d / %d\n", n_cov, nrow(master)))
+  if (n_cov == 0) {
+    stop(sprintf(paste0(
+      "No sample matched the ancestry PC file.\n",
+      "  Example master plink_iid: %s\n",
+      "  Example ancestry IID:     %s"),
+      paste(head(master$plink_iid, 3), collapse=", "),
+      paste(head(anc$plink_iid, 3),    collapse=", ")))
+  }
+} else {
+  cat("No ancestry PC file supplied — skipping ancestry adjustment\n")
+  anc <- NULL
+}
+
 # ── Step 8: Build covariate matrix ───────────────────────────────────────────
 log_section("Step 8: Build covariate matrix")
 
-# Covariates: age + cell-type proportions
+# Covariates: age + cell-type proportions + ancestry PCs
 # Drop one cell type to avoid collinearity (Neutro is typically most abundant)
 cell_cols <- setdiff(colnames(cell_props),
                      c("sample_col_name", "PATNO", "Neutro", "Eosino"))
 
 covar_data <- master %>%
-  select(PATNO, ENROLL_AGE) %>%
+  select(PATNO, plink_iid, ENROLL_AGE) %>%
   left_join(cell_props %>% select(PATNO, all_of(cell_cols)), by="PATNO")
+
+if (!is.null(anc)) {
+  covar_data <- covar_data %>% left_join(anc, by="plink_iid")
+}
+covar_data <- covar_data %>% select(-plink_iid)
 
 n_missing_covar <- sum(!master$PATNO %in% covar_data$PATNO[
   complete.cases(covar_data)
@@ -218,7 +286,7 @@ if (n_missing_covar > 0) {
 }
 
 cat(sprintf("Covariate columns: %s\n",
-    paste(c("ENROLL_AGE", cell_cols), collapse=", ")))
+    paste(c("ENROLL_AGE", cell_cols, pc_cols), collapse=", ")))
 
 # ── Step 9: Save per-dataset outputs ─────────────────────────────────────────
 log_section("Step 9: Save datasets")
@@ -234,7 +302,7 @@ save_dataset <- function(cohort_val, dataset_name, label) {
     inner_join(
       covar_data %>%
         filter(complete.cases(.)) %>%
-        select(PATNO, all_of(cell_cols)),   # only cell cols from covar_data
+        select(PATNO, all_of(c(cell_cols, pc_cols))),  # cell + PC cols only
       by = "PATNO"
     )
 
@@ -257,7 +325,7 @@ save_dataset <- function(cohort_val, dataset_name, label) {
               nrow(meth_sub), ncol(meth_sub), basename(mf)))
 
   # Covariate matrix: covariates x samples (PATNO columns)
-  covar_cols_out <- c("ENROLL_AGE", cell_cols)
+  covar_cols_out <- c("ENROLL_AGE", cell_cols, pc_cols)
   covar_sub_df   <- stratum %>% select(PATNO, all_of(covar_cols_out))
 
   # Verify all covariate columns exist
@@ -277,6 +345,25 @@ save_dataset <- function(cohort_val, dataset_name, label) {
   cat(sprintf("  Age standardised: mean=%.1f sd=%.1f -> z-score\n",
               age_mean, age_sd))
 
+  # Standardise ancestry PCs for the same reason. Projected PC scores run from
+  # ~0.15 (PC1) down to ~1e-4 (PC5); left raw, the small-scale PCs produce
+  # correspondingly huge betas. Standardising is scale-only and does not change
+  # p-values. A PC with zero variance inside a stratum is left untouched rather
+  # than divided by zero.
+  for (pc in pc_cols) {
+    mu <- mean(covar_sub_df[[pc]], na.rm=TRUE)
+    sdv <- sd(covar_sub_df[[pc]], na.rm=TRUE)
+    if (is.na(sdv) || sdv == 0) {
+      cat(sprintf("  WARNING: %s has zero variance in this stratum — left raw\n", pc))
+      next
+    }
+    covar_sub_df[[pc]] <- (covar_sub_df[[pc]] - mu) / sdv
+  }
+  if (length(pc_cols) > 0) {
+    cat(sprintf("  Ancestry PCs standardised: %s\n",
+                paste(pc_cols, collapse=", ")))
+  }
+
   covar_sub <- t(as.matrix(covar_sub_df[, covar_cols_out]))
   colnames(covar_sub) <- stratum$PATNO
   rownames(covar_sub) <- covar_cols_out
@@ -289,7 +376,7 @@ save_dataset <- function(cohort_val, dataset_name, label) {
               nrow(covar_sub), ncol(covar_sub), basename(cf)))
 
   # PLINK2 --keep file: FID IID format
-  # Imputed psam has a proper #FID column (FID=IID=PPMISI{PATNO}.variant2)
+  # Imputed psam has a proper #FID column (FID=IID=PPMISI{PATNO})
   # so keep files use FID IID (not 0 IID which was needed for WGS single-col psam)
   gf <- file.path(out, "geno_keep.txt")
   write.table(data.frame(FID=stratum$plink_iid, IID=stratum$plink_iid),

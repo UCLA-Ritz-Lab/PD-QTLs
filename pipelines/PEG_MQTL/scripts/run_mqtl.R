@@ -209,4 +209,17 @@ me <- Matrix_eQTL_main(
 rm(snpspos_df, genepos_df, snp_pos, cpg_pos); gc()
 cat(sprintf("[%s] Complete.\n", Sys.time()))
 cat(sprintf("Cis mQTLs  (p < %.0e): %d\n", opt$pval_cis,  me$cis$neqtls))
-cat(sprintf("Trans mQTLs (p < %.0e): %d\n", opt$pval_trans, me$trans$neqtls))
+
+# pval_trans = 0 disables the trans pass outright: MatrixEQTL skips the
+# computation (rather than merely filtering the output, which is what any
+# non-zero threshold does), returns no $trans element, and never creates the
+# trans output file. Snakemake declares that file as a rule output, so write a
+# header-only stub to keep the rule's contract. Header matches MatrixEQTL's own
+# so downstream readers need no special case.
+if (is.null(me$trans)) {
+  cat(sprintf("Trans mQTLs: analysis disabled (pval_trans=%g)\n", opt$pval_trans))
+  writeLines("SNP\tgene\tbeta\tt-stat\tp-value\tFDR", opt$out_trans)
+  cat(sprintf("Wrote header-only trans file: %s\n", opt$out_trans))
+} else {
+  cat(sprintf("Trans mQTLs (p < %.0e): %d\n", opt$pval_trans, me$trans$neqtls))
+}
