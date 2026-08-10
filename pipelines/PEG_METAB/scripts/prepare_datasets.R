@@ -6,7 +6,10 @@
 #
 # Covariates used:
 #   Female, Age, PlasmaBlast, CD8pCD28nCD45RAn, CD4T, NK, Mono, Gran (cell types),
-#   Ethnicity dummy variables (Hispanic, Asian, Black; ref=Caucasian)
+#   ancestry: genetic PCs from --ancestry_pcs when supplied, otherwise the
+#     legacy self-reported Ethnicity dummies (Hispanic, Asian, Black;
+#     ref=Caucasian). The two are alternatives, never both — self-report and
+#     the leading PCs encode the same axis and would be near-collinear.
 #   PDstudyDiseaseNumeric is excluded — constant within case/control strata
 #
 # Sample ID mapping:
@@ -26,6 +29,8 @@ option_list <- list(
   make_option("--hilic_keyvar", type="character"),
   make_option("--covar_peg1",   type="character"),
   make_option("--covar_peg2",   type="character"),
+  make_option("--ancestry_pcs", type="character", default=NULL),
+  make_option("--n_pcs",        type="integer",   default=5L),
   make_option("--gwas_linkage", type="character",
               help="CSV mapping GWAS_ID (VCF sample IDs) to Pegid"),
   make_option("--vcf",          type="character"),
@@ -81,18 +86,10 @@ dummy_ethnicity <- function(covar_df) {
   covar_df
 }
 
-covar_peg1 <- covar_peg1 %>%
-  dummy_ethnicity() %>%
-  select(pegid, all_of(COVAR_COLS),
-         Ethnicity_Hispanic, Ethnicity_Asian, Ethnicity_Black)
-
-covar_peg2 <- covar_peg2 %>%
-  dummy_ethnicity() %>%
-  select(pegid, all_of(COVAR_COLS),
-         Ethnicity_Hispanic, Ethnicity_Asian, Ethnicity_Black)
-
-cat(sprintf("Covar PEG1: %d samples, %d vars\n", nrow(covar_peg1), ncol(covar_peg1) - 1))
-cat(sprintf("Covar PEG2: %d samples, %d vars\n", nrow(covar_peg2), ncol(covar_peg2) - 1))
+# Ethnicity is carried through unencoded for now; the ancestry section below
+# either drops it in favour of genetic PCs or dummy-codes it as the fallback.
+covar_peg1 <- covar_peg1 %>% select(pegid, all_of(COVAR_COLS), Ethnicity)
+covar_peg2 <- covar_peg2 %>% select(pegid, all_of(COVAR_COLS), Ethnicity)
 
 # -- Get VCF sample IDs and resolve to pegids ---------------------------------
 vcf_samples_raw <- system(paste("bcftools query -l", opt$vcf), intern=TRUE)
@@ -120,6 +117,107 @@ cat(sprintf("VCF samples mapped to pegids: %d, example: '%s'\n",
             length(vcf_samples), vcf_samples[1]))
 cat(sprintf("Keyvar pegid example: '%s'\n",
     head(c18_key$pegid[!is.na(c18_key$pegid) & c18_key$pegid != "NA"], 1)))
+
+# -- Ancestry adjustment ------------------------------------------------------
+# Genetic PCs are keyed by GWAS_ID (CRG_*/CRG2_*), the VCF's sample namespace,
+# while every covariate/metabolomics table here is keyed by pegid. They must be
+# joined through the linkage — intersecting the two namespaces directly gives
+# the empty set. Uses the DUP=0 rows only, so one pegid maps to one genotype.
+use_pcs <- !is.null(opt$ancestry_pcs) && nzchar(opt$ancestry_pcs)
+
+if (use_pcs) {
+  if (!all(c("Pegid", "GWAS_ID", "DUP") %in% colnames(gwas_link))) {
+    stop(sprintf(paste0(
+      "Ancestry PC join needs Pegid, GWAS_ID and DUP columns in %s.\n",
+      "  Found: %s"),
+      opt$gwas_linkage, paste(colnames(gwas_link), collapse=", ")))
+  }
+
+  linkage_dedup <- gwas_link %>%
+    filter(DUP == 0, !is.na(Pegid), Pegid != "", !is.na(GWAS_ID), GWAS_ID != "") %>%
+    select(Pegid, GWAS_ID)
+  cat(sprintf("Linkage rows (DUP=0): %d\n", nrow(linkage_dedup)))
+
+  anc_raw <- read.csv(opt$ancestry_pcs, stringsAsFactors=FALSE)
+  avail   <- grep("^PC[0-9]+$", colnames(anc_raw), value=TRUE)
+  avail   <- avail[order(as.integer(sub("^PC", "", avail)))]
+  if (opt$n_pcs > length(avail)) {
+    stop(sprintf("Requested %d ancestry PCs but file has only %d (%s)",
+                 opt$n_pcs, length(avail), opt$ancestry_pcs))
+  }
+  pc_cols <- head(avail, opt$n_pcs)
+
+  anc_pc <- anc_raw %>%
+    select(GWAS_ID = IID, all_of(pc_cols)) %>%
+    inner_join(linkage_dedup, by="GWAS_ID") %>%
+    select(pegid = Pegid, all_of(pc_cols))
+
+  cat(sprintf("Ancestry PC file: %d samples, %d PCs available, using %s\n",
+              nrow(anc_raw), length(avail), paste(pc_cols, collapse=", ")))
+  cat(sprintf("Resolved to pegid via linkage: %d\n", nrow(anc_pc)))
+  if (nrow(anc_pc) == 0) {
+    stop(sprintf(paste0(
+      "No ancestry PC sample resolved to a pegid.\n",
+      "  Example PC IID:          %s\n",
+      "  Example linkage GWAS_ID: %s"),
+      paste(head(anc_raw$IID, 3),           collapse=", "),
+      paste(head(linkage_dedup$GWAS_ID, 3), collapse=", ")))
+  }
+  if (anyDuplicated(anc_pc$pegid)) {
+    stop("Ancestry PCs resolved to duplicate pegids — check DUP filtering in linkage")
+  }
+
+  # Ethnicity dummies are dropped here, not kept alongside: the leading PCs and
+  # the self-report encode the same axis and would be near-collinear.
+  #
+  # inner_join, not left_join: a sample with no PCs would otherwise carry NA
+  # covariates into MatrixEQTL. Dropping it from the covariate table lets the
+  # existing three-way intersection exclude it, which is where every other
+  # sample loss in this script is already accounted for.
+  #
+  # PCs are standardised because projected scores run from ~0.15 (PC1) down to
+  # ~1e-4 (PC5); left raw, the small-scale PCs yield correspondingly huge betas.
+  # This is an affine rescaling, so MatrixEQTL p-values are unchanged. Done per
+  # wave — also affine, so per-dataset would give identical results.
+  attach_pcs <- function(covar_df, wave_label) {
+    n_before <- nrow(covar_df)
+    out <- covar_df %>%
+      select(-Ethnicity) %>%
+      inner_join(anc_pc, by="pegid")
+    cat(sprintf("%s: %d / %d samples have ancestry PCs\n",
+                wave_label, nrow(out), n_before))
+    if (nrow(out) == 0) {
+      stop(sprintf("No %s sample matched the ancestry PC file", wave_label))
+    }
+    for (pc in pc_cols) {
+      mu  <- mean(out[[pc]], na.rm=TRUE)
+      sdv <- sd(out[[pc]],   na.rm=TRUE)
+      if (is.na(sdv) || sdv == 0) {
+        cat(sprintf("  WARNING: %s has zero variance in %s — left raw\n",
+                    pc, wave_label))
+        next
+      }
+      out[[pc]] <- (out[[pc]] - mu) / sdv
+    }
+    out
+  }
+
+  covar_peg1 <- attach_pcs(covar_peg1, "PEG1")
+  covar_peg2 <- attach_pcs(covar_peg2, "PEG2")
+  cat(sprintf("Ancestry PCs standardised per wave: %s\n",
+              paste(pc_cols, collapse=", ")))
+} else {
+  cat("No ancestry PC file supplied — falling back to self-reported Ethnicity dummies\n")
+  covar_peg1 <- dummy_ethnicity(covar_peg1) %>% select(-Ethnicity)
+  covar_peg2 <- dummy_ethnicity(covar_peg2) %>% select(-Ethnicity)
+}
+
+cat(sprintf("Covar PEG1: %d samples, %d vars (%s)\n",
+            nrow(covar_peg1), ncol(covar_peg1) - 1,
+            paste(setdiff(colnames(covar_peg1), "pegid"), collapse=", ")))
+cat(sprintf("Covar PEG2: %d samples, %d vars (%s)\n",
+            nrow(covar_peg2), ncol(covar_peg2) - 1,
+            paste(setdiff(colnames(covar_peg2), "pegid"), collapse=", ")))
 
 # -- Feature filtering --------------------------------------------------------
 filter_features <- function(mat, min_sd, max_na_frac, platform) {

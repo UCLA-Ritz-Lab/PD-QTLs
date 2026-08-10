@@ -22,8 +22,30 @@
 
 configfile: "config.yaml"
 
-OUT      = config["out_dir"]
-DATASETS = list(config["datasets"].keys())
+OUT = config["out_dir"]
+
+# ALL_DATASETS is every cohort defined in config; DATASETS is the subset this
+# invocation actually analyses. The two must stay distinct: prepare_datasets is
+# a single R call that writes every cohort in one pass, so its output list is
+# always ALL_DATASETS. Only the per-dataset rules downstream of it are narrowed.
+ALL_DATASETS = list(config["datasets"].keys())
+DATASETS     = ALL_DATASETS
+
+# Restrict the run to a subset of cohorts:
+#   snakemake --config cohort=ppmi_controls
+#   snakemake --config cohort=ppmi_cases,ppmi_controls
+# Intended for splitting run_mqtl across cluster jobs — one cohort per
+# submission parallelises better than one job doing both sequentially.
+_cohort_sel = config.get("cohort")
+if _cohort_sel:
+    _sel = ([c.strip() for c in _cohort_sel.split(",")]
+            if isinstance(_cohort_sel, str) else list(_cohort_sel))
+    _unknown = [c for c in _sel if c not in ALL_DATASETS]
+    if _unknown:
+        raise WorkflowError(
+            "Unknown cohort(s) in --config cohort=: {}. Available: {}".format(
+                ", ".join(_unknown), ", ".join(ALL_DATASETS)))
+    DATASETS = _sel
 
 # ── Targets ───────────────────────────────────────────────────────────────────
 rule all:
@@ -43,17 +65,21 @@ rule prepare_datasets:
         beta_matrix     = config["data"]["beta_matrix"],
         cell_type_props = config["data"]["cell_type_props"],
         phenotype_file  = config["data"]["phenotype_file"],
+        ancestry_pcs    = config["data"]["ancestry_pcs"],
         psam            = config["data"]["plink_prefix"] + ".psam"
     output:
+        # ALL_DATASETS, not DATASETS: one R call writes every cohort, and
+        # narrowing this list would leave the unselected files with no
+        # producing rule for any downstream rule that still needs them.
         probe_list  = f"{OUT}/datasets/retained_probes.txt",
         meth_files  = expand("{out}/datasets/{dataset}/methylation.csv.gz",
-                             out=OUT, dataset=DATASETS),
+                             out=OUT, dataset=ALL_DATASETS),
         covar_files = expand("{out}/datasets/{dataset}/covariates.csv",
-                             out=OUT, dataset=DATASETS),
+                             out=OUT, dataset=ALL_DATASETS),
         keep_files  = expand("{out}/datasets/{dataset}/geno_keep.txt",
-                             out=OUT, dataset=DATASETS),
+                             out=OUT, dataset=ALL_DATASETS),
         id_maps     = expand("{out}/datasets/{dataset}/id_map.csv",
-                             out=OUT, dataset=DATASETS)
+                             out=OUT, dataset=ALL_DATASETS)
     conda:
         "envs/r_mqtl.yaml"
     threads:
@@ -67,10 +93,12 @@ rule prepare_datasets:
             --cell_type_props {input.cell_type_props} \
             --plink_prefix    {config[data][plink_prefix]} \
             --phenotype_file  {input.phenotype_file} \
+            --ancestry_pcs    {input.ancestry_pcs} \
+            --n_pcs           {config[ancestry][n_pcs]} \
             --out_dir         {OUT} \
             --meth_visit      {config[id][meth_visit]} \
-            --plink_id_prefix {config[id][plink_prefix]} \
-            --plink_id_suffix {config[id][plink_suffix]} \
+            --plink_id_prefix "{config[id][plink_prefix]}" \
+            --plink_id_suffix "{config[id][plink_suffix]}" \
             --cohort_case     {config[cohorts][case]} \
             --cohort_control  {config[cohorts][control]} \
             --min_sd          {config[filters][min_sd]} \
@@ -92,7 +120,7 @@ rule extract_positions:
         snp_pos  = f"{OUT}/positions/snp_positions.csv",
         cpg_pos  = f"{OUT}/positions/cpg_positions.csv",
         pvar     = f"{OUT}/positions/reference.pvar",
-        keep_all = temp(f"{OUT}/positions/all_variant2.keep")
+        keep_all = temp(f"{OUT}/positions/all_samples.keep")
     conda:
         "envs/r_mqtl.yaml"
     threads:
@@ -104,12 +132,16 @@ rule extract_positions:
         set -euo pipefail
         mkdir -p {OUT}/positions
 
-        # Build keep file for ALL .variant2 samples so MAF is computed on the
+        # Build keep file for ALL genotyped samples so MAF is computed on the
         # full 894-sample cohort, not just the ~200-sample cases subsample.
         # Using cases only dropped ~9x more variants at MAF >= 0.05 (565K vs 5.2M).
-        grep -F ".variant2" {input.psam} | grep -v "^#" | \
-            awk '{{print $1, $2}}' > {output.keep_all}
-        echo "Full .variant2 cohort: $(wc -l < {output.keep_all}) samples" >> {log}
+        awk -f scripts/psam_to_keep.awk {input.psam} > {output.keep_all}
+        n_keep=$(wc -l < {output.keep_all})
+        echo "Full genotype cohort: $n_keep samples" >> {log}
+        if [ "$n_keep" -eq 0 ]; then
+            echo "ERROR: empty keep file built from {input.psam}" >> {log}
+            exit 1
+        fi
 
         # --geno removed: imputed DS field missingness is not true missingness;
         # Rsq >= 0.3 filter in post-imputation already excluded poorly imputed sites.
@@ -189,15 +221,16 @@ rule subset_genotypes:
 # Used to select the most frequent ALT allele at multiallelic sites for
 # --export-allele, ensuring consistent allele coding across all datasets
 # (cases, controls) and across cohorts (PPMI, PEG) for meta-analysis.
-# Must use the full .variant2 cohort, not per-dataset subsamples.
+# Must use the full genotype cohort, not per-dataset subsamples.
 # ──────────────────────────────────────────────────────────────────────────────
 rule allele_frequencies:
     input:
         psam     = config["data"]["plink_prefix"] + ".psam",
-        keep_all = f"{OUT}/positions/all_variant2.keep"
+        keep_all = f"{OUT}/positions/all_samples.keep"
     output:
         afreq    = f"{OUT}/positions/cohort_allele_freq.afreq",
-        export_allele = f"{OUT}/positions/export_allele.txt"
+        export_allele = f"{OUT}/positions/export_allele.txt",
+        keep_variants = f"{OUT}/positions/best_variants.txt"
     conda:
         "envs/tools.yaml"
     threads:
@@ -208,7 +241,7 @@ rule allele_frequencies:
         """
         set -euo pipefail
 
-        # Compute allele frequencies on full .variant2 cohort.
+        # Compute allele frequencies on full genotype cohort.
         # --set-all-var-ids forces unique chr:pos:ref:alt IDs so that
         # multiallelic sites produce separate entries in the afreq file.
         plink2 \
@@ -221,36 +254,32 @@ rule allele_frequencies:
             --threads {threads} \
         2> {log}
 
-        # Build --export-allele file: for each chr:pos position, find the
-        # ALT allele with the highest cohort-wide frequency.
-        # All variant IDs at that position (e.g. chr:pos:ref:altA and
-        # chr:pos:ref:altB) are mapped to the same best allele, so
-        # --export-allele outputs consistent dosage across all datasets.
-        # Format: two columns, full pvar ID and the allele to count.
-        awk 'NR>1 {{
-            id=$2; alt=$4; freq=$5
-            # Extract chr:pos key from full chr:pos:ref:alt ID
-            split(id, parts, ":")
-            chrpos = parts[1]":"parts[2]
+        # Select one record per chr:pos — the one whose own ALT has the highest
+        # cohort-wide frequency — and count that record's own ALT. Using
+        # cohort-wide frequencies keeps orientation consistent across cases,
+        # controls, and between PPMI and PEG. See scripts/best_allele.awk for
+        # why every record at a position must NOT be mapped to a shared allele.
+        awk -f scripts/best_allele.awk {output.afreq} > {output.export_allele}
 
-            # Track highest-freq ALT per chr:pos position
-            if (!(chrpos in best) || freq > best_freq[chrpos]) {{
-                best[chrpos] = alt
-                best_freq[chrpos] = freq
-            }}
-            # Store all full variant IDs at this position
-            ids[id] = chrpos
-        }}
-        END {{
-            # Output full chr:pos:ref:alt ID with best ALT at that position.
-            # PLINK2 --export-allele matches on the full pvar ID, not chr:pos.
-            for (id in ids) {{
-                chrpos = ids[id]
-                print id"	"best[chrpos]
-            }}
-        }}' {output.afreq} > {output.export_allele}
+        # First column is the surviving variant list for --extract in
+        # export_genotypes; without it PLINK2 would still export the
+        # non-selected records using their default counted allele.
+        cut -f1 {output.export_allele} > {output.keep_variants}
 
-        echo "Export allele file: $(wc -l < {output.export_allele}) variants" >> {log}
+        n_af=$(grep -vc '^#' {output.afreq})
+        n_ea=$(wc -l < {output.export_allele})
+        echo "Allele freq records: $n_af" >> {log}
+        echo "Export allele file:  $n_ea variants (one per chr:pos)" >> {log}
+        echo "Dropped as non-best at a shared position: $((n_af - n_ea))" >> {log}
+
+        # Every emitted allele must genuinely belong to its own record,
+        # otherwise PLINK2 silently exports all-zero dosage.
+        n_bad=$(awk -F'\t' '{{n=split($1,p,":"); if (p[n] != $2) c++}} END {{print c+0}}' \
+                {output.export_allele})
+        if [ "$n_bad" -ne 0 ]; then
+            echo "ERROR: $n_bad export-allele entries name an allele absent from their record" >> {log}
+            exit 1
+        fi
         """
 
 
@@ -263,7 +292,8 @@ rule export_genotypes:
         pgen         = f"{OUT}/genotypes/{{dataset}}.pgen",
         psam         = f"{OUT}/genotypes/{{dataset}}.psam",
         pvar         = f"{OUT}/genotypes/{{dataset}}.pvar",
-        export_allele = f"{OUT}/positions/export_allele.txt"
+        export_allele = f"{OUT}/positions/export_allele.txt",
+        keep_variants = f"{OUT}/positions/best_variants.txt"
     output:
         tsv = f"{OUT}/genotypes/{{dataset}}.geno.tsv.gz"
     conda:
@@ -281,8 +311,11 @@ rule export_genotypes:
         # --export-allele specifies which allele to count at each variant.
         # Using cohort-wide frequencies ensures consistent orientation
         # across cases, controls, and between PPMI and PEG cohorts.
+        # --extract restricts to the one record chosen per chr:pos, so the
+        # counted allele is always present in the record it is applied to.
         plink2 \
             --pfile          {params.prefix} \
+            --extract        {input.keep_variants} \
             --export         Av \
             --export-allele  {input.export_allele} \
             --out            {params.prefix} \
@@ -291,8 +324,10 @@ rule export_genotypes:
 
         # --maj-ref in subset_genotypes ensures the major allele in this
         # subsample is always REF, so the counted ALT allele is always the
-        # minor allele. Deduplication is still applied as a safety measure
-        # in case any chr:pos collisions remain after --max-alleles 2.
+        # minor allele. The chr:pos dedup below is now only a backstop: the
+        # --extract above already leaves one record per position. It must not
+        # be relied on to resolve collisions, because it keeps whichever
+        # record comes first rather than the best-allele one.
         awk -f scripts/reformat_traw.awk {params.prefix}.traw | \
             awk 'NR==1{{print; next}} !seen[$1]++{{print}}' | \
             bgzip -c > {output.tsv}

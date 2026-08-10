@@ -19,6 +19,8 @@ option_list <- list(
   make_option("--covar_peg2",       type="character"),
   make_option("--gwas_linkage",     type="character"),
   make_option("--vcf",              type="character"),
+  make_option("--ancestry_pcs",     type="character", default=NULL),
+  make_option("--n_pcs",            type="integer",   default=5L),
   make_option("--out_dir",          type="character",
              help="Root results directory — datasets/ and logs/ created here"),
   make_option("--min_sd",           type="double",  default=0.02),
@@ -92,6 +94,11 @@ valid_peg1 <- peg1_meta %>% filter(!is.na(Pegid), !is.na(PDstudyDiseaseNumeric))
 peg1_mat_pid <- peg1_mat[, valid_peg1$sentrix_id, drop=FALSE]
 colnames(peg1_mat_pid) <- valid_peg1$Pegid
 
+# Free the source and the transposed copy — each is ~2.2 GB and neither is read
+# again. Without this the script holds datMethPEG1t, peg1_mat, peg1_mat_pid and
+# later peg1_filt simultaneously, which is what exhausted a 31 GB machine.
+rm(datMethPEG1t, peg1_mat); gc()
+
 # ── Load PEG2 ─────────────────────────────────────────────────────────────────
 log_section("Step 3: PEG2")
 
@@ -127,14 +134,20 @@ valid_peg2 <- peg2_meta %>% filter(!is.na(Pegid))
 peg2_mat_pid <- peg2_mat[, valid_peg2$sentrix_id, drop=FALSE]
 colnames(peg2_mat_pid) <- valid_peg2$Pegid
 
+rm(datMethPEG2t, peg2_mat); gc()
+
 # ── Probe filtering ───────────────────────────────────────────────────────────
 log_section("Step 4: Probe filtering")
 
 common_probes <- intersect(rownames(peg1_mat_pid), rownames(peg2_mat_pid))
 cat(sprintf("Common probes: %d\n", length(common_probes)))
 
-probe_sds <- apply(peg1_mat_pid[common_probes,], 1, sd, na.rm=TRUE)
-probe_nas <- rowMeans(is.na(peg1_mat_pid[common_probes,]))
+# Subset once and reuse — the original form built two separate ~2 GB copies of
+# the same block, one per statistic.
+p1_common <- peg1_mat_pid[common_probes, , drop=FALSE]
+probe_sds <- apply(p1_common, 1, sd, na.rm=TRUE)
+probe_nas <- rowMeans(is.na(p1_common))
+rm(p1_common); gc()
 
 keep_probes <- names(probe_sds)[
   probe_sds >= opt$min_sd & probe_nas <= opt$max_na_frac
@@ -147,18 +160,94 @@ cat(sprintf("Probes retained:           %d\n", length(keep_probes)))
 peg1_filt <- peg1_mat_pid[keep_probes,]
 peg2_filt <- peg2_mat_pid[keep_probes,]
 
+# The unfiltered per-Pegid matrices are superseded by the filtered ones.
+rm(peg1_mat_pid, peg2_mat_pid); gc()
+
 # Save retained probe list
 writeLines(keep_probes, file.path(opt$out_dir, "datasets", "retained_probes.txt"))
 
+# ── Ancestry PCs ──────────────────────────────────────────────────────────────
+log_section("Ancestry PCs")
+
+# The PC file is keyed by GWAS_ID (CRG_*/CRG2_*), the VCF's sample namespace,
+# while all methylation/covariate tables here are keyed by Pegid. Join through
+# the same DUP=0 linkage used for the VCF — intersecting the two namespaces
+# directly gives the empty set.
+pc_cols <- character(0)
+if (!is.null(opt$ancestry_pcs) && nzchar(opt$ancestry_pcs)) {
+  anc_raw <- read.csv(opt$ancestry_pcs, stringsAsFactors=FALSE)
+  avail   <- grep("^PC[0-9]+$", colnames(anc_raw), value=TRUE)
+  avail   <- avail[order(as.integer(sub("^PC", "", avail)))]
+  if (opt$n_pcs > length(avail)) {
+    stop(sprintf("Requested %d ancestry PCs but file has only %d (%s)",
+                 opt$n_pcs, length(avail), opt$ancestry_pcs))
+  }
+  pc_cols <- head(avail, opt$n_pcs)
+
+  anc_pc <- anc_raw %>%
+    select(GWAS_ID = IID, all_of(pc_cols)) %>%
+    inner_join(linkage, by="GWAS_ID") %>%
+    select(Pegid, all_of(pc_cols))
+
+  cat(sprintf("Ancestry PC file: %d samples, %d PCs available, using %s\n",
+              nrow(anc_raw), length(avail), paste(pc_cols, collapse=", ")))
+  cat(sprintf("Resolved to Pegid via linkage: %d\n", nrow(anc_pc)))
+  if (nrow(anc_pc) == 0) {
+    stop(sprintf(paste0(
+      "No ancestry PC sample resolved to a Pegid.\n",
+      "  Example PC IID:        %s\n",
+      "  Example linkage GWAS_ID: %s"),
+      paste(head(anc_raw$IID, 3),      collapse=", "),
+      paste(head(linkage$GWAS_ID, 3),  collapse=", ")))
+  }
+  if (anyDuplicated(anc_pc$Pegid)) {
+    stop("Ancestry PCs resolved to duplicate Pegids — check DUP filtering in linkage")
+  }
+
+  n1 <- sum(valid_peg1$Pegid %in% anc_pc$Pegid)
+  n2 <- sum(valid_peg2$Pegid %in% anc_pc$Pegid)
+  cat(sprintf("PEG1 samples with PCs: %d / %d\n", n1, nrow(valid_peg1)))
+  cat(sprintf("PEG2 samples with PCs: %d / %d\n", n2, nrow(valid_peg2)))
+
+  # inner_join, not left_join: a sample absent from the PC file would otherwise
+  # keep its row with NA in every PC column, and MatrixEQTL cannot accept NA
+  # covariates. Dropping those samples here is the only correct option — there
+  # is nothing to impute a genetic PC from — so the cohort shrinks by the counts
+  # reported above. Every downstream matrix is subset by the ids taken from
+  # these tables, so they stay aligned.
+  valid_peg1 <- valid_peg1 %>% inner_join(anc_pc, by="Pegid")
+  valid_peg2 <- valid_peg2 %>% inner_join(anc_pc, by="Pegid")
+  cat(sprintf("Retained after PC join: PEG1 %d, PEG2 %d\n",
+              nrow(valid_peg1), nrow(valid_peg2)))
+} else {
+  cat("No ancestry PC file supplied — skipping ancestry adjustment\n")
+}
+
 # ── Covariate columns ─────────────────────────────────────────────────────────
 covar_cols <- c("Female","Age","PlasmaBlast","CD8pCD28nCD45RAn",
-                "CD4T","NK","Mono","Gran")
+                "CD4T","NK","Mono","Gran", pc_cols)
 
 make_covar_mat <- function(meta_df, cols) {
   cols     <- intersect(cols, colnames(meta_df))
   sub_df   <- meta_df %>%
     select(Pegid, all_of(cols)) %>%
     filter(!is.na(Pegid))
+
+  # Standardise ancestry PCs. Projected scores run from ~0.15 (PC1) down to
+  # ~1e-4 (PC5); left raw, the small-scale PCs yield correspondingly huge
+  # betas. This is an affine rescaling, so MatrixEQTL p-values are unchanged.
+  # Done per wave rather than per case/control stratum — also affine, so the
+  # results are identical either way.
+  for (pc in intersect(pc_cols, cols)) {
+    mu  <- mean(sub_df[[pc]], na.rm=TRUE)
+    sdv <- sd(sub_df[[pc]],   na.rm=TRUE)
+    if (is.na(sdv) || sdv == 0) {
+      cat(sprintf("  WARNING: %s has zero variance — left raw\n", pc))
+      next
+    }
+    sub_df[[pc]] <- (sub_df[[pc]] - mu) / sdv
+  }
+
   # Build covariates x samples matrix (MatrixEQTL convention)
   mat           <- t(as.matrix(sub_df[, cols, drop=FALSE]))
   colnames(mat) <- sub_df$Pegid
@@ -202,9 +291,16 @@ save_dataset <- function(beta_mat, covar_mat, meta_df,
   c_sub   <- covar_mat[, matched, drop=FALSE]
   m_sub   <- meta_df %>% filter(Pegid %in% matched)
 
-  # Methylation (probe_id + Pegid columns)
+  # Methylation (probe_id + Pegid columns).
+  # cbind(probe_id=..., as.data.frame(b_sub)) built two further full copies of
+  # the block on top of b_sub itself — the write was where the job was OOM
+  # killed. as.data.table copies once, then the id column is added by reference.
+  dt <- as.data.table(b_sub)
+  dt[, probe_id := rownames(b_sub)]
+  setcolorder(dt, "probe_id")
   mf <- file.path(out, "methylation.csv.gz")
-  fwrite(cbind(probe_id=rownames(b_sub), as.data.frame(b_sub)), mf)
+  fwrite(dt, mf)
+  rm(dt); gc()
 
   # Covariates (covariate + Pegid columns)
   cf <- file.path(out, "covariates.csv")
@@ -241,7 +337,10 @@ save_dataset(peg1_filt[,peg1_ctrl_ids], peg1_covar[,peg1_ctrl_ids],
              valid_peg1 %>% filter(case_control=="control"),
              "peg1_controls", linkage, vcf_samples)
 
-save_dataset(peg2_filt, peg2_covar, valid_peg2,
+# Subset by valid_peg2$Pegid rather than passing peg2_filt whole: the PC join
+# above can drop samples from valid_peg2, and peg2_covar is built from it, so
+# an unsubset beta matrix would carry columns that have no covariate column.
+save_dataset(peg2_filt[, valid_peg2$Pegid, drop=FALSE], peg2_covar, valid_peg2,
              "peg2_cases", linkage, vcf_samples)
 
 log_section("Done")

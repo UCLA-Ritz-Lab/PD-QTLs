@@ -13,6 +13,10 @@ data:
   covar_peg2:       "../../Downloads/PEG_covariates/covariates_peg2.csv"
   gwas_linkage:     "../../Downloads/PEG_WGS/gwas_linkage.csv"
   vcf:              "../../results/PEG_WGS/post_imputed/peg_imputed_filtered.dose.vcf.gz"
+  # 1000G-anchored ancestry PCs (ANCESTRY_REF pipeline output).
+  # Keyed by IID = GWAS_ID (CRG_*/CRG2_*), NOT Pegid — joined through
+  # gwas_linkage.csv, the same crosswalk used for the VCF sample names.
+  ancestry_pcs:     "../../results/ANCESTRY_REF/covariates/ancestry_pcs_PEG.csv"
 
 # Output directory
 out_dir: "../../results/PEG_MQTL"
@@ -32,6 +36,16 @@ datasets:
     wave:       "PEG2"
     case_group: "cases"
 
+# ── Ancestry covariates ───────────────────────────────────────────────────────
+# Number of ancestry PCs to include as mQTL covariates. Reference PCA
+# eigenvalues put 90.7% of variance in PC1-4, PC5 at 1.4%, PC6+ on a ~0.5%
+# noise plateau — so 5 covers the elbow with one margin PC. Matches PPMI_MQTL,
+# which matters because these cohorts are meta-analysed together.
+# These replace the legacy STRUCTURE K1a-K4a admixture proportions; PEG
+# previously carried no ancestry adjustment in the mQTL covariates at all.
+ancestry:
+  n_pcs: 5
+
 # ── Probe filtering ────────────────────────────────────────────────────────────
 filters:
   min_sd:           0.02
@@ -42,8 +56,14 @@ matrixeqtl:
   cis_dist:         1000000
   pval_cis:         1e-3    # relaxed from 1e-5 to improve meta-analysis overlap
                             # FDR correction applied at meta-analysis stage
-  pval_trans:       1e-20   # effectively disabled — insufficient power for trans
-                            # in individual cohorts; revisit with larger N
+  pval_trans:       0       # trans analysis OFF — insufficient power for trans
+                            # in individual cohorts; revisit with larger N.
+                            # Must be exactly 0 to disable: MatrixEQTL computes
+                            # every SNP x CpG pair for any non-zero threshold
+                            # and only filters at write time, so 1e-20 still
+                            # cost a full scan (~15 h per cohort). At 0 the
+                            # trans pass is skipped and run_mqtl.R writes a
+                            # header-only trans_mqtls.txt.
   model:            "linear"
 
 # ── Imputation quality filter ─────────────────────────────────────────────────
