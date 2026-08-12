@@ -6,8 +6,8 @@
 # phase 3's *released* genotypes, which are a far better reference than
 # anything we could call ourselves (the phase 3 BAMs are ~4x low-coverage;
 # the release is imputed/refined across all 2504 samples). The read-level
-# work in ../ngs_exercise/ is a separate, self-contained learning exercise
-# and feeds nothing here.
+# GIAB benchmarking exercise that used to sit in ../ngs_exercise/ now lives
+# in its own repository and feeds nothing here.
 # ──────────────────────────────────────────────────────────────────────────────
 
 out_dir: "../../../results/ANCESTRY_REF"
