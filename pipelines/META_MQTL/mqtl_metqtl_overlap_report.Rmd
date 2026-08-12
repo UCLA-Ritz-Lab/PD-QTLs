@@ -27,7 +27,20 @@ RESULTS_DIR <- "../../results/META_MQTL"
 # Row cap for the metQTL trans files. Mirrors `downstream.max_trans_rows` in
 # pipelines/PEG_METAB/config.yaml — kept as a literal here so the report stays
 # readable standalone; update both together if it changes.
-MAX_TRANS_ROWS <- 10000000
+#
+# Lowered 10,000,000 -> 1,000,000 on 2026-08-12. Only the FDR<0.05 subset feeds
+# the overlap, and because MatrixEQTL writes p-value ascending, those rows sit
+# at the very top of each file: the largest significant block in any single
+# file was 10,685 rows (hilic_peg1_controls), worst significant p ~5.8e-8. The
+# old cap read ten million rows per file to use eleven thousand of them, then
+# wrote the remainder to a 2.4 GB CSV that nothing reads back.
+#
+# 1M keeps ~90x headroom over the largest observed significant block, so a
+# future run would have to produce two orders of magnitude more signal before
+# this cap could silently clip a significant row. If that ever happens the
+# symptom is the worst retained FDR dropping below 0.05 — check it before
+# assuming the overlap shrank for biological reasons.
+MAX_TRANS_ROWS <- 1000000
 ```
 
 ## Overview
@@ -103,9 +116,30 @@ combine_and_fdr <- function(group_label, files, fdr_threshold = 0.05) {
       mutate(source_file = basename(dirname(f)))
   }))
 
+  # Safety net for the row cap. Rows are p-value ascending, so significant rows
+  # can only be lost if a file both hit the cap AND was still significant at the
+  # last retained row. Anything else means the cap only cut dead tail.
+  cap_check <- combined %>%
+    group_by(source_file) %>%
+    summarise(n = n(), worst_fdr = max(FDR, na.rm = TRUE), .groups = "drop") %>%
+    mutate(hit_cap = n >= MAX_TRANS_ROWS,
+           clipped_signal = hit_cap & worst_fdr < fdr_threshold)
+  print(cap_check)
+  if (any(cap_check$clipped_signal)) {
+    cat(sprintf(paste0("\n  *** MAX_TRANS_ROWS (%s) CLIPPED SIGNIFICANT ROWS in: %s. ",
+                       "The FDR<%.2f set is truncated — raise the cap and re-run. ***\n"),
+                format(MAX_TRANS_ROWS, big.mark = ","),
+                paste(cap_check$source_file[cap_check$clipped_signal], collapse = ", "),
+                fdr_threshold))
+  }
+
   sig <- combined %>% filter(FDR < fdr_threshold)
 
-  out_all <- file.path(RESULTS_DIR, sprintf("peg1_%s_metqtl_combined_fdr.csv", group_label))
+  # The combined table is the capped read in full and is never read back — only
+  # `sig` feeds the overlap. write_csv gzips on a .gz extension, which takes it
+  # from ~2.4 GB to a fraction of that per group. `sig` stays plain: it is small
+  # and gets opened by hand.
+  out_all <- file.path(RESULTS_DIR, sprintf("peg1_%s_metqtl_combined_fdr.csv.gz", group_label))
   out_sig <- file.path(RESULTS_DIR, sprintf("peg1_%s_metqtl_sig_fdr05.csv", group_label))
   write_csv(combined, out_all)
   write_csv(sig, out_sig)

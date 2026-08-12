@@ -103,7 +103,10 @@ matrixeqtl:
 # rows. Previously this was a manual `head -10000000` on the cluster before
 # transfer; capping at read time instead keeps the transferred file complete.
 downstream:
-  max_trans_rows: 10000000
+  # Lowered 10M -> 1M 2026-08-12. Only the FDR<0.05 rows feed the overlap and
+  # they sit at the top of the p-value-sorted file (largest observed block:
+  # 10,685 rows), so 10M read three orders of magnitude more than it used.
+  max_trans_rows: 1000000
 
 # ── Imputation quality filter ─────────────────────────────────────────────────
 imputation:
