@@ -46,9 +46,36 @@ participant_status <- read_csv("../../Downloads/PPMI_covariates/Participant_Stat
                                 col_types = cols(PATNO = col_character()),
                                 guess_max = Inf)
 
+# 1000G-anchored ancestry PCs from the ANCESTRY_REF pipeline, keyed by IID
+# (PPMISI{PATNO}). 5 PCs matches PPMI_MQTL: the reference PCA elbow is at PC5,
+# with PC6+ on a ~0.5% noise plateau.
+N_ANCESTRY_PCS <- 5L
+
+ancestry <- read_csv("../../results/ANCESTRY_REF/covariates/ancestry_pcs_PPMI.csv",
+                      col_types = cols(IID = col_character(), .default = col_double()),
+                      guess_max = Inf)
+
+pc_avail <- grep("^PC[0-9]+$", names(ancestry), value = TRUE)
+pc_avail <- pc_avail[order(as.integer(sub("^PC", "", pc_avail)))]
+if (N_ANCESTRY_PCS > length(pc_avail)) {
+  stop("Requested ", N_ANCESTRY_PCS, " ancestry PCs but file has only ", length(pc_avail))
+}
+pc_covars <- head(pc_avail, N_ANCESTRY_PCS)
+
+ancestry <- ancestry %>%
+  mutate(PATNO = str_extract(IID, "(?<=PPMISI)[0-9]+")) %>%
+  filter(!is.na(PATNO)) %>%
+  select(PATNO, all_of(pc_covars))
+
+if (anyDuplicated(ancestry$PATNO) > 0) {
+  stop("Ancestry PC file has duplicate PATNOs after IID parsing — investigate before proceeding")
+}
+cat("Ancestry PCs loaded:", nrow(ancestry), "samples;", length(pc_avail),
+    "available, using", paste(pc_covars, collapse = ", "), "\n")
+
 # ---- Per-pair model runner, with warnings captured into the output row ----
 
-run_one_pair <- function(pair_id, snp_id, cpg_id, meth_long, covar, cell_covars, geno_long) {
+run_one_pair <- function(pair_id, snp_id, cpg_id, meth_long, covar, cell_covars, pc_covars, geno_long) {
   warn_msgs <- character(0)
 
   result <- withCallingHandlers({
@@ -62,7 +89,8 @@ run_one_pair <- function(pair_id, snp_id, cpg_id, meth_long, covar, cell_covars,
                      n_subjects = n_distinct(df$PATNO), status = "skipped_low_n"))
     }
 
-    fx <- paste(c("dosage", "age_bl_z", "time_since_bl_months_z", cell_covars), collapse = " + ")
+    fx <- paste(c("dosage", "age_bl_z", "time_since_bl_months_z", cell_covars, pc_covars),
+                collapse = " + ")
     f0 <- as.formula(paste("methylation ~", fx, "+ (1|PATNO)"))
     f1 <- as.formula(paste("methylation ~", fx, "+ dosage:time_since_bl_months_z + (1|PATNO)"))
 
@@ -124,12 +152,27 @@ run_longitudinal_group <- function(group, cohort_label, mc_cores = 8) {
                            col_types = cols(snp_id = col_character(), .default = col_double()),
                            guess_max = Inf)
 
-  variant2_cols <- names(geno_subset)[str_ends(names(geno_subset), "\\.variant2$")]
-  cat("Genotype columns kept (.variant2):", length(variant2_cols),
-      "/ total (excl. snp_id):", ncol(geno_subset) - 1, "\n")
+  # Sample-ID namespace depends on which upstream genotypes prep_full.sh pulled.
+  # The pre-imputation WGS psam mixed ".variant2" columns (real genotype data)
+  # with ".variant" columns (no genotype information), so the suffix picked out
+  # the usable ones. The imputed psam (PPMI_MQTL id.plink_suffix = "") has only
+  # real samples as bare PPMISI{PATNO}, so keep everything in that case.
+  sample_cols <- setdiff(names(geno_subset), "snp_id")
+  variant2_cols <- sample_cols[str_ends(sample_cols, "\\.variant2$")]
+  if (length(variant2_cols) > 0) {
+    sample_cols <- variant2_cols
+    cat("Genotype columns kept (.variant2):", length(sample_cols),
+        "/ total (excl. snp_id):", ncol(geno_subset) - 1, "\n")
+  } else {
+    cat("Genotype columns kept (no .variant2 suffix — imputed namespace):",
+        length(sample_cols), "\n")
+  }
+  if (length(sample_cols) == 0) {
+    stop(group, ": genotype file has no sample columns")
+  }
 
   geno_long <- geno_subset %>%
-    select(snp_id, all_of(variant2_cols)) %>%
+    select(snp_id, all_of(sample_cols)) %>%
     pivot_longer(-snp_id, names_to = "raw_id", values_to = "dosage") %>%
     mutate(PATNO = str_extract(raw_id, "(?<=PPMISI)[0-9]+")) %>%
     select(snp_id, PATNO, dosage)
@@ -148,6 +191,17 @@ run_longitudinal_group <- function(group, cohort_label, mc_cores = 8) {
     filter(COHORT_DEFINITION == cohort_label)
 
   cat("Subjects in covar:", n_distinct(covar$PATNO), "\n")
+
+  # Ancestry PCs: inner_join, so subjects without PCs leave here rather than
+  # being dropped silently per-model by lmer's NA handling (which would make
+  # n_subjects vary across pairs for no genotype-related reason).
+  n_before_pc <- n_distinct(covar$PATNO)
+  covar <- covar %>% inner_join(ancestry, by = "PATNO")
+  cat("Subjects with ancestry PCs:", n_distinct(covar$PATNO), "/", n_before_pc, "\n")
+  if (nrow(covar) == 0) {
+    stop(group, ": no subject matched the ancestry PC file — check IID/PATNO parsing")
+  }
+
   print(table(table(covar$PATNO)))
 
   # zero-variance check on genotyped analytic subset specifically
@@ -168,10 +222,22 @@ run_longitudinal_group <- function(group, cohort_label, mc_cores = 8) {
   cat("age_bl: mean =", round(age_bl_mean,2), "sd =", round(age_bl_sd,2), "\n")
   cat("time_since_bl_months: mean =", round(time_mean,2), "sd =", round(time_sd,2), "\n")
 
+  # Standardise the PCs on the same analytic population. Projected scores run
+  # from ~0.15 (PC1) down to ~1e-4 (PC5), so raw values give correspondingly
+  # huge betas; the rescaling is affine, so p-values are unchanged. Done in
+  # place to keep the formula terms named PC1..PCn.
+  pc_mean <- vapply(covar_analytic[pc_covars], mean, numeric(1))
+  pc_sd   <- vapply(covar_analytic[pc_covars], sd,   numeric(1))
+  if (any(pc_sd == 0)) {
+    stop(group, ": zero-variance ancestry PC(s) in analytic subset: ",
+         paste(pc_covars[pc_sd == 0], collapse = ", "))
+  }
+
   covar <- covar %>%
     mutate(
       age_bl_z               = (age_bl - age_bl_mean) / age_bl_sd,
-      time_since_bl_months_z = (time_since_bl_months - time_mean) / time_sd
+      time_since_bl_months_z = (time_since_bl_months - time_mean) / time_sd,
+      across(all_of(pc_covars), ~ (.x - pc_mean[cur_column()]) / pc_sd[cur_column()])
     )
 
   # ---- Run all pairs, in chunks, with progress reporting ----
@@ -190,7 +256,7 @@ run_longitudinal_group <- function(group, cohort_label, mc_cores = 8) {
 
     chunk_results <- mclapply(idx, function(i) {
       run_one_pair(hits$pair_id[i], hits$snp_id[i], hits$cpg_id[i],
-                   meth_long, covar, cell_covars, geno_long)
+                   meth_long, covar, cell_covars, pc_covars, geno_long)
     }, mc.cores = mc_cores)
 
     results[idx] <- chunk_results
