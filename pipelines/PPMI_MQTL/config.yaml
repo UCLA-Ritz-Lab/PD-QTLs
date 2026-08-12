@@ -73,7 +73,11 @@ filters:
 # Thresholds matched to PEG pipeline to ensure comparable meta-analysis inputs
 matrixeqtl:
   cis_dist:    1000000
-  pval_cis:    1e-5    # keep current — already 3.3M pairs at this threshold
+  # Relaxed from 1e-5 to match PEG_MQTL. A strict per-cohort threshold drops
+  # pairs before the meta-analysis can combine evidence across cohorts, which
+  # shrinks the hit list feeding PPMI_LONG and the mQTL x metQTL overlap.
+  # FDR correction is applied at the meta-analysis stage, not here.
+  pval_cis:    1e-3
   pval_trans:  0       # trans analysis OFF — insufficient power for trans in
                        # individual cohorts; revisit with larger N.
                        # Must be exactly 0 to disable: MatrixEQTL computes
@@ -83,6 +87,8 @@ matrixeqtl:
                        # cohort). At 0 the trans pass is skipped entirely and
                        # run_mqtl.R writes a header-only trans_mqtls.txt.
   model:       "linear"
+  gzip_output: true   # write .txt.gz — smaller transfers off the cluster,
+                      # and readers stream the gzip with a row cap anyway
 
 # ── PLINK2 QC filters ─────────────────────────────────────────────────────────
 plink:

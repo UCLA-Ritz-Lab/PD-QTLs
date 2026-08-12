@@ -29,6 +29,7 @@ option_list <- list(
   make_option("--cis_dist",     type="double",  default=1e6),
   make_option("--pval_cis",     type="double",  default=1e-5),
   make_option("--pval_trans",   type="double",  default=1e-5),
+  make_option("--gzip_output",  action="store_true", default=FALSE),
   make_option("--threads",      type="integer", default=1),
   make_option("--log",          type="character", default="run_metqtl.log")
 )
@@ -288,26 +289,67 @@ cat(sprintf("[%s] Memory before MatrixEQTL: %.1f MB\n",
 # ── Run MatrixEQTL ─────────────────────────────────────────────────────────────
 cat(sprintf("[%s] Running MatrixEQTL...\n", Sys.time()))
 
+# MatrixEQTL writes to `output_file_name` as either a path or an open
+# connection. Handing it a gzfile() connection compresses as it writes, so the
+# ~8.5 GB plain trans output at pval_trans=1e-2 never lands on disk uncompressed.
+open_out <- function(path, use_gzip) {
+  if (!use_gzip) return(path)
+  con <- gzfile(path, open = "wt")
+  con
+}
+
+out_trans_target <- open_out(opt$out_trans, opt$gzip_output)
+out_cis_target   <- open_out(opt$out_cis,   opt$gzip_output)
+
+# noFDRsaveMemory must stay FALSE. It has two effects beyond memory: it drops
+# the FDR column entirely, and it writes results unsorted in streaming chunks.
+# Downstream consumers depend on both — the overlap report filters on FDR, and
+# the row cap in config `downstream.max_trans_rows` is only meaningful because
+# MatrixEQTL sorts by p-value ascending when it computes FDR, so truncating
+# keeps the most significant rows rather than an arbitrary slice.
 me <- Matrix_eQTL_main(
   snps                  = snp_data,
   gene                  = metab_data,
   cvrt                  = covar_data,
-  output_file_name      = opt$out_trans,
+  output_file_name      = out_trans_target,
   pvOutputThreshold     = opt$pval_trans,
   useModel              = modelLINEAR,
   errorCovariance       = numeric(),
   verbose               = TRUE,
-  output_file_name.cis  = opt$out_cis,
+  output_file_name.cis  = out_cis_target,
   pvOutputThreshold.cis = opt$pval_cis,
   snpspos               = snpspos_df,
   genepos               = genepos_df,
   cisDist               = opt$cis_dist,
   pvalue.hist           = FALSE,
   min.pv.by.genesnp     = FALSE,
-  noFDRsaveMemory       = TRUE
+  noFDRsaveMemory       = FALSE
 )
+
+for (con in list(out_trans_target, out_cis_target)) {
+  if (inherits(con, "connection") && isOpen(con)) close(con)
+}
 
 rm(snpspos_df, genepos_df, snp_pos, feature_pos); gc()
 cat(sprintf("[%s] Complete.\n", Sys.time()))
-cat(sprintf("Cis metQTLs  (p < %.0e): %d\n", opt$pval_cis,   me$cis$neqtls))
-cat(sprintf("Trans metQTLs (p < %.0e): %d\n", opt$pval_trans, me$trans$neqtls))
+
+# When output_file_name is a connection rather than a path, MatrixEQTL returns
+# an empty me$cis / me$trans — neqtls is NULL and the old sprintf("%d") logging
+# silently printed nothing. Count from the written file instead, streaming so a
+# multi-GB gzip never has to be held in memory.
+count_rows <- function(path) {
+  con <- if (grepl("\\.gz$", path)) gzfile(path, open = "rt") else file(path, open = "rt")
+  on.exit(close(con))
+  n <- 0L
+  repeat {
+    chunk <- readLines(con, n = 1e6L, warn = FALSE)
+    if (length(chunk) == 0L) break
+    n <- n + length(chunk)
+  }
+  max(n - 1L, 0L)   # drop header
+}
+
+cat(sprintf("Cis metQTLs  (p < %.0e): %d\n", opt$pval_cis,   count_rows(opt$out_cis)))
+cat(sprintf("Trans metQTLs (p < %.0e): %d\n", opt$pval_trans, count_rows(opt$out_trans)))
+cat(sprintf("Output compression: %s\n", if (opt$gzip_output) "gzip" else "none"))
+cat(sprintf("Trans output size: %.2f GB\n", file.size(opt$out_trans) / 1024^3))

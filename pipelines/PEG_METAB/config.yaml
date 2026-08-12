@@ -72,9 +72,38 @@ filters:
 # ── MatrixEQTL settings ───────────────────────────────────────────────────────
 matrixeqtl:
   cis_dist:    1000000  # cis window in bp (1 Mb)
-  pval_cis:    1e-5     # cis output threshold
-  pval_trans:  1e-8     # trans output threshold
+  # Must be >= pval_trans. MatrixEQTL asserts
+  #   pvOutputThreshold == 0 || pvOutputThreshold.cis == 0 ||
+  #   pvOutputThreshold <= pvOutputThreshold.cis
+  # and dies with a bare stopifnot() otherwise — which is what a cis of 1e-5
+  # against a trans of 1e-2 produced.
+  #
+  # The value is otherwise inert here: extract_positions.R assigns every
+  # metabolite feature chr=0/pos=0 (untargeted features have no genomic
+  # position), so no SNP is ever within cisDist of a feature, every pair is
+  # classified trans, and cis_metqtls.txt is always header-only. Kept equal to
+  # pval_trans rather than set to 0 so MatrixEQTL still creates the cis file
+  # that the Snakefile declares as an output.
+  pval_cis:    1e-2     # cis output threshold — inert; see above
+  # Liberal trans threshold on purpose. A strict threshold (1e-8) leaves ~3k
+  # rows per dataset, few of which share a SNP with the longitudinal mQTL hit
+  # list, so the mQTL x metQTL overlap comes back nearly empty. At 1e-2 the
+  # output is a superset that keeps enough candidates for the overlap to be
+  # informative; multiple-testing correction happens downstream, not here.
+  pval_trans:  1e-2     # trans output threshold
   model:       "linear"
+  # MatrixEQTL's FDR column is required downstream (the overlap report filters
+  # on it). Computing it means holding every retained p-value in RAM, which is
+  # why noFDRsaveMemory was once switched on; the cluster has the headroom, so
+  # it stays off. See run_metqtl.R.
+  gzip_output: true     # write .txt.gz — a 1e-2 trans pass runs to ~8.5 GB plain
+
+# Row cap for downstream readers. The full 1e-2 trans output is far larger than
+# R can hold, so consumers stream the gzip and keep the first N p-value-sorted
+# rows. Previously this was a manual `head -10000000` on the cluster before
+# transfer; capping at read time instead keeps the transferred file complete.
+downstream:
+  max_trans_rows: 10000000
 
 # ── Imputation quality filter ─────────────────────────────────────────────────
 imputation:

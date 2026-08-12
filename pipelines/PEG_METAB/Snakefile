@@ -41,15 +41,23 @@ if _cohort_sel:
                 ", ".join(_unknown), ", ".join(ALL_DATASETS)))
     DATASETS = _sel
 
+# MatrixEQTL output compression. At the liberal trans threshold the plain-text
+# trans file runs to ~8.5 GB per dataset, so run_metqtl.R writes through a
+# gzfile() connection instead. Toggling this changes the declared output paths,
+# so flip it in config.yaml rather than renaming files by hand.
+GZIP_METQTL = config["matrixeqtl"].get("gzip_output", False)
+METQTL_EXT  = ".gz" if GZIP_METQTL else ""
+GZIP_FLAG   = "--gzip_output" if GZIP_METQTL else ""
+
 FILTERED_VCF = f"{OUT}/genotypes/peg_imputed_maf05_rsq08.vcf.gz"
 
 
 # -- Targets -------------------------------------------------------------------
 rule all:
     input:
-        expand("{out}/metqtl/{dataset}/cis_metqtls.txt",
+        expand("{out}/metqtl/{dataset}/cis_metqtls.txt" + METQTL_EXT,
                out=OUT, dataset=DATASETS),
-        expand("{out}/metqtl/{dataset}/trans_metqtls.txt",
+        expand("{out}/metqtl/{dataset}/trans_metqtls.txt" + METQTL_EXT,
                out=OUT, dataset=DATASETS)
 
 
@@ -298,8 +306,8 @@ rule run_metqtl:
         snp_pos     = f"{OUT}/positions/snp_positions.csv",
         feature_pos = f"{OUT}/positions/feature_positions.csv"
     output:
-        cis   = f"{OUT}/metqtl/{{dataset}}/cis_metqtls.txt",
-        trans = f"{OUT}/metqtl/{{dataset}}/trans_metqtls.txt"
+        cis   = f"{OUT}/metqtl/{{dataset}}/cis_metqtls.txt{METQTL_EXT}",
+        trans = f"{OUT}/metqtl/{{dataset}}/trans_metqtls.txt{METQTL_EXT}"
     conda:
         "envs/r_metqtl.yaml"
     threads:
@@ -323,6 +331,7 @@ rule run_metqtl:
             --cis_dist    {config[matrixeqtl][cis_dist]} \
             --pval_cis    {config[matrixeqtl][pval_cis]} \
             --pval_trans  {config[matrixeqtl][pval_trans]} \
+            {GZIP_FLAG} \
             --threads     {threads} \
             --log         {log} \
         2>> {log}

@@ -23,6 +23,7 @@ option_list <- list(
   make_option("--cis_dist",    type="double",  default=1e6),
   make_option("--pval_cis",    type="double",  default=1e-3),
   make_option("--pval_trans",  type="double",  default=1e-5),
+  make_option("--gzip_output", action="store_true", default=FALSE),
   make_option("--threads",     type="integer", default=4),
   make_option("--log",         type="character", default="run_mqtl.log")
 )
@@ -187,28 +188,69 @@ cat(sprintf("[%s] Memory before MatrixEQTL: %.1f MB used\n",
 # ── Run MatrixEQTL ────────────────────────────────────────────────────────────
 cat(sprintf("[%s] Running MatrixEQTL...\n", Sys.time()))
 
+# MatrixEQTL accepts either a path or an open connection for its output
+# arguments. A gzfile() connection compresses as it writes, so the liberal cis
+# threshold never lands on disk uncompressed. When the trans pass is disabled
+# (pval_trans = 0) MatrixEQTL never touches the trans output, so leave that one
+# as a plain path — opening a connection there would leave a valid-but-empty
+# .gz that the header-only stub below would then overwrite with plain text.
+open_out <- function(path, use_gzip) {
+  if (!use_gzip) return(path)
+  gzfile(path, open = "wt")
+}
+
+out_cis_target   <- open_out(opt$out_cis, opt$gzip_output)
+out_trans_target <- if (opt$pval_trans == 0) opt$out_trans else
+                      open_out(opt$out_trans, opt$gzip_output)
+
 me <- Matrix_eQTL_main(
   snps                  = snp_data,
   gene                  = meth_data,
   cvrt                  = covar_data,
-  output_file_name      = opt$out_trans,
+  output_file_name      = out_trans_target,
   pvOutputThreshold     = opt$pval_trans,
   useModel              = modelLINEAR,
   errorCovariance       = numeric(),
   verbose               = TRUE,
-  output_file_name.cis  = opt$out_cis,
+  output_file_name.cis  = out_cis_target,
   pvOutputThreshold.cis = opt$pval_cis,
   snpspos               = snpspos_df,
   genepos               = genepos_df,
   cisDist               = opt$cis_dist,
   pvalue.hist           = FALSE,
   min.pv.by.genesnp     = FALSE,
-  noFDRsaveMemory       = TRUE
+  # Must stay FALSE. Beyond memory, noFDRsaveMemory=TRUE drops the FDR column
+  # and writes results unsorted in streaming chunks. Downstream needs both: the
+  # FDR column, and p-value-ascending order so the 10M-row cap that protects
+  # readers from the liberal cis threshold keeps the most significant rows
+  # instead of an arbitrary slice.
+  noFDRsaveMemory       = FALSE
 )
+
+for (con in list(out_cis_target, out_trans_target)) {
+  if (inherits(con, "connection") && isOpen(con)) close(con)
+}
 
 rm(snpspos_df, genepos_df, snp_pos, cpg_pos); gc()
 cat(sprintf("[%s] Complete.\n", Sys.time()))
-cat(sprintf("Cis mQTLs  (p < %.0e): %d\n", opt$pval_cis,  me$cis$neqtls))
+
+# When output_file_name is a connection, MatrixEQTL returns an empty me$cis —
+# neqtls is NULL, and sprintf("%d", NULL) silently prints nothing. Count from
+# the written file instead, streaming so a multi-GB gzip is never held in RAM.
+count_rows <- function(path) {
+  con <- if (grepl("\\.gz$", path)) gzfile(path, open = "rt") else file(path, open = "rt")
+  on.exit(close(con))
+  n <- 0L
+  repeat {
+    chunk <- readLines(con, n = 1e6L, warn = FALSE)
+    if (length(chunk) == 0L) break
+    n <- n + length(chunk)
+  }
+  max(n - 1L, 0L)   # drop header
+}
+
+cat(sprintf("Cis mQTLs  (p < %.0e): %d\n", opt$pval_cis, count_rows(opt$out_cis)))
+cat(sprintf("Output compression: %s\n", if (opt$gzip_output) "gzip" else "none"))
 
 # pval_trans = 0 disables the trans pass outright: MatrixEQTL skips the
 # computation (rather than merely filtering the output, which is what any
@@ -218,8 +260,10 @@ cat(sprintf("Cis mQTLs  (p < %.0e): %d\n", opt$pval_cis,  me$cis$neqtls))
 # so downstream readers need no special case.
 if (is.null(me$trans)) {
   cat(sprintf("Trans mQTLs: analysis disabled (pval_trans=%g)\n", opt$pval_trans))
-  writeLines("SNP\tgene\tbeta\tt-stat\tp-value\tFDR", opt$out_trans)
+  stub_con <- if (opt$gzip_output) gzfile(opt$out_trans, open = "wt") else file(opt$out_trans, open = "wt")
+  writeLines("SNP\tgene\tbeta\tt-stat\tp-value\tFDR", stub_con)
+  close(stub_con)
   cat(sprintf("Wrote header-only trans file: %s\n", opt$out_trans))
 } else {
-  cat(sprintf("Trans mQTLs (p < %.0e): %d\n", opt$pval_trans, me$trans$neqtls))
+  cat(sprintf("Trans mQTLs (p < %.0e): %d\n", opt$pval_trans, count_rows(opt$out_trans)))
 }
