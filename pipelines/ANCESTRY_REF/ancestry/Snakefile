@@ -19,8 +19,9 @@
 #
 # Build: GRCh37 / hg19, bare contig naming (1, not chr1) throughout.
 #
-# The read-level work in ../ngs_exercise/ is a separate learning exercise on
-# GRCh38 and feeds nothing here.
+# The read-level GIAB benchmarking exercise that used to sit in
+# ../ngs_exercise/ now lives in its own repository. It was always a separate
+# learning exercise and feeds nothing here.
 # ──────────────────────────────────────────────────────────────────────────────
 
 configfile: "config.yaml"
