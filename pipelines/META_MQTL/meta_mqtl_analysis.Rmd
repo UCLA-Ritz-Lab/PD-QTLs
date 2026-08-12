@@ -51,6 +51,27 @@ RESULTS <- list(
   ppmi_controls = "../../results/PPMI_MQTL/mqtl/ppmi_controls/cis_mqtls.txt"
 )
 
+# Row cap per cohort file. The per-cohort cis thresholds are deliberately
+# liberal (1e-2 for PEG_MQTL, 1e-3 for PPMI_MQTL) so that enough pairs survive
+# for the meta-analysis to combine evidence across cohorts — which makes the
+# raw files far too large to read whole on this machine.
+#
+# This cap is NOT the same one the overlap report applies: that one bounds the
+# PEG_METAB trans metQTL files, which this report never reads. Nothing caps
+# these files at write time, so this is the only guard on the cis path.
+#
+# Note this is a real analytic trade-off, not just a memory guard: truncation
+# happens before cohorts are pooled, so a pair that would have reached
+# significance only by combining weak-but-concordant evidence across cohorts
+# can be cut. The load step warns when a file actually hits the cap.
+MAX_CIS_ROWS <- 10000000
+
+# PEG_MQTL and PPMI_MQTL now write gzipped output (matrixeqtl.gzip_output in
+# their config.yaml). Prefer the .gz when it exists so this report works both
+# before and after those pipelines are re-run, without editing paths twice.
+resolve_path <- function(p) if (file.exists(paste0(p, ".gz"))) paste0(p, ".gz") else p
+RESULTS <- lapply(RESULTS, resolve_path)
+
 # Meta-analysis groupings
 # Cases:    PEG1 × PPMI two-way — comparable sample sizes to controls
 #           PEG2 excluded from primary; used as sensitivity analysis below
@@ -101,7 +122,47 @@ load_mqtl <- function(path, dataset_name) {
     warning(sprintf("File not found: %s", path))
     return(NULL)
   }
-  dat <- fread(path, data.table=FALSE)
+  # MatrixEQTL writes p-value ascending when it computes FDR
+  # (noFDRsaveMemory = FALSE), so capping keeps the most significant rows and
+  # discards only the tail. See MAX_CIS_ROWS above for the trade-off.
+  #
+  # Read via `zcat | head` rather than fread(nrows=) on the gzip directly:
+  # fread decompresses the *entire* file before honouring nrows (measured: read
+  # time scales with total file size, 1.8s -> 5.4s for a 4x larger file at the
+  # same cap), which on a multi-GB cis file means expanding every row we are
+  # about to discard. Piping through head stops at the cap — constant time and
+  # the lowest peak memory of the options tested.
+  if (grepl("\\.gz$", path)) {
+    dat <- fread(cmd = sprintf("zcat %s | head -n %.0f",
+                               shQuote(path), MAX_CIS_ROWS + 1),
+                 data.table = FALSE)
+  } else {
+    dat <- fread(path, data.table = FALSE, nrows = MAX_CIS_ROWS)
+  }
+
+  # A failed decompress or a bad path surfaces as an empty read rather than an
+  # error, which would otherwise sail past the file.exists() check above and
+  # silently drop a whole cohort from the meta-analysis.
+  if (nrow(dat) == 0) {
+    warning(sprintf("%s: read 0 rows from %s — decompression or path problem?",
+                    dataset_name, path))
+    return(NULL)
+  }
+
+  # Reported with cat(), not warning(): this document sets warning = FALSE in
+  # its global chunk options, so a warning() here is swallowed outright and the
+  # truncation would go unrecorded. Truncation changes which pairs can reach
+  # significance, so it belongs in the rendered output, not the console.
+  if (nrow(dat) == MAX_CIS_ROWS) {
+    pcol <- intersect(c("p-value", "p.value", "pvalue"), colnames(dat))
+    worst_p <- if (length(pcol) > 0) max(dat[[pcol[1]]], na.rm=TRUE) else NA_real_
+    cat(sprintf(
+      paste0("  *** %s: HIT THE %s-ROW CAP — least significant rows dropped ",
+             "before meta-analysis (worst p retained: %.3g). Pairs that would ",
+             "only reach significance by pooling across cohorts may be lost. ",
+             "Raise MAX_CIS_ROWS if RAM allows. ***\n"),
+      dataset_name, format(MAX_CIS_ROWS, big.mark=","), worst_p))
+  }
 
   # Normalise column names — MatrixEQTL output varies between pipelines:
   # PEG uses:  SNP  gene  beta  t-stat  p-value  FDR

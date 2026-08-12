@@ -23,6 +23,11 @@ library(purrr)
 library(knitr)
 
 RESULTS_DIR <- "../../results/META_MQTL"
+
+# Row cap for the metQTL trans files. Mirrors `downstream.max_trans_rows` in
+# pipelines/PEG_METAB/config.yaml — kept as a literal here so the report stays
+# readable standalone; update both together if it changes.
+MAX_TRANS_ROWS <- 10000000
 ```
 
 ## Overview
@@ -53,18 +58,32 @@ independently via xmsannotator mass/retention-time matching — with partial
 coverage (23/33 features get any match, 11/33 a high-confidence named
 compound; see Step 6 for caveats).
 
-**A methodological note carried through this analysis:** the `trans_metqtls.txt`
-files were generated with a liberal `pvOutputThreshold` (1e-2) and then
-manually truncated to the first 10M p-value-sorted rows to avoid an
-out-of-memory error on load. This means the file is *not* the full test space
-— a BH correction recomputed on this file alone would be invalid, since it
-would rank an already-preselected low-p subset against itself rather than
-against the true, much larger, denominator of all tests performed. We
-confirmed the truncation only cut into the non-significant tail (FDR ~0.75-0.85
-at the last retained row of every file) and therefore use **MatrixEQTL's own
-per-file FDR column** rather than recomputing it — treating c18 and hilic as
-separate multiple-testing families rather than one merged correction, since a
-combined correction isn't recoverable from truncated data anyway.
+**A methodological note carried through this analysis:** the
+`trans_metqtls.txt.gz` files are generated with a liberal `pvOutputThreshold`
+(1e-2, set in `pipelines/PEG_METAB/config.yaml`) so that enough candidate SNPs
+survive to make the overlap with the longitudinal mQTL hits informative. The
+complete output is written gzipped and kept intact; the truncation to the first
+`r format(MAX_TRANS_ROWS, big.mark = ",")` rows now happens **at read time**
+here, by streaming the gzip and stopping at the cap, rather than by a manual
+`head` on the cluster before transfer.
+
+Two consequences follow, and both matter:
+
+- The rows we load are *not* the full test space, so a BH correction recomputed
+  on them alone would be invalid — it would rank an already-preselected low-p
+  subset against itself instead of against the true, much larger, denominator
+  of all tests performed. We therefore use **MatrixEQTL's own per-file FDR
+  column**, which is computed against that true denominator before any
+  truncation, rather than recomputing it here. This requires
+  `noFDRsaveMemory = FALSE` in `run_metqtl.R`; with it on, MatrixEQTL omits the
+  FDR column entirely.
+- The cap is only safe because MatrixEQTL sorts its output by p-value ascending
+  when it computes FDR. Truncating therefore discards the least significant
+  tail, not an arbitrary slice.
+
+c18 and hilic are treated as separate multiple-testing families rather than one
+merged correction, since a combined correction isn't recoverable from truncated
+data anyway.
 
 ---
 
@@ -74,10 +93,13 @@ combined correction isn't recoverable from truncated data anyway.
 combine_and_fdr <- function(group_label, files, fdr_threshold = 0.05) {
 
   combined <- bind_rows(lapply(files, function(f) {
+    # read_tsv streams the gzip rather than expanding it, and n_max stops the
+    # read at the cap, so peak memory is bounded by the cap and not by the
+    # on-disk file — which at pval_trans = 1e-2 is several GB compressed.
     read_tsv(f, col_types = cols(SNP = col_character(), gene = col_character(),
                                   beta = col_double(), `t-stat` = col_double(),
                                   `p-value` = col_double(), FDR = col_double()),
-              guess_max = Inf) %>%
+              n_max = MAX_TRANS_ROWS, guess_max = Inf) %>%
       mutate(source_file = basename(dirname(f)))
   }))
 
@@ -93,14 +115,14 @@ combine_and_fdr <- function(group_label, files, fdr_threshold = 0.05) {
 
 cases_metqtl    <- combine_and_fdr(
   "cases",
-  c("../../results/PEG_METAB/metqtl/c18_peg1_cases/trans_metqtls.txt",
-    "../../results/PEG_METAB/metqtl/hilic_peg1_cases/trans_metqtls.txt")
+  c("../../results/PEG_METAB/metqtl/c18_peg1_cases/trans_metqtls.txt.gz",
+    "../../results/PEG_METAB/metqtl/hilic_peg1_cases/trans_metqtls.txt.gz")
 )
 
 controls_metqtl <- combine_and_fdr(
   "controls",
-  c("../../results/PEG_METAB/metqtl/c18_peg1_controls/trans_metqtls.txt",
-    "../../results/PEG_METAB/metqtl/hilic_peg1_controls/trans_metqtls.txt")
+  c("../../results/PEG_METAB/metqtl/c18_peg1_controls/trans_metqtls.txt.gz",
+    "../../results/PEG_METAB/metqtl/hilic_peg1_controls/trans_metqtls.txt.gz")
 )
 
 metqtl_cases_sig    <- cases_metqtl$sig
@@ -142,6 +164,10 @@ overlap_group <- function(group_label, mqtl_classified_file, metqtl_sig) {
     rename(metabolite_feature = gene, metqtl_beta = beta, metqtl_pval = `p-value`, metqtl_fdr = FDR)
 
   write_csv(overlap, file.path(RESULTS_DIR, sprintf("mqtl_metqtl_overlap_%s.csv", group_label)))
+
+  # Carry the mQTL denominator with the result so the summary table can report
+  # it instead of a hardcoded literal that goes stale on the next re-run.
+  attr(overlap, "n_mqtl_pairs") <- nrow(mqtl)
   overlap
 }
 
@@ -155,7 +181,11 @@ overlap_controls <- overlap_group("controls",
 ```{r overlap-summary}
 overlap_summary <- tibble(
   group                = c("Cases", "Controls"),
-  mqtl_pairs_tested     = c(18986, 15282),
+  # Derived, not hardcoded: these were literals (18986, 15282) from a run two
+  # hit-lists ago and silently misreported the denominator once PPMI_LONG was
+  # re-run against a new meta-analysis.
+  mqtl_pairs_tested     = c(attr(overlap_cases, "n_mqtl_pairs"),
+                            attr(overlap_controls, "n_mqtl_pairs")),
   metqtl_sig_pairs       = c(nrow(metqtl_cases_sig), nrow(metqtl_controls_sig)),
   unique_shared_snps     = c(n_distinct(overlap_cases$snp_id), n_distinct(overlap_controls$snp_id)),
   overlap_rows           = c(nrow(overlap_cases), nrow(overlap_controls))

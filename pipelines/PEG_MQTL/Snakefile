@@ -15,6 +15,15 @@ configfile: "config.yaml"
 
 OUT = config["out_dir"]
 
+# MatrixEQTL output compression. At the liberal cis threshold the plain-text
+# output is large enough that transfer and storage both suffer, so run_mqtl.R
+# writes through a gzfile() connection instead. Toggling this changes the
+# declared output paths, so flip it in config.yaml rather than renaming by hand.
+GZIP_MQTL = config["matrixeqtl"].get("gzip_output", False)
+MQTL_EXT  = ".gz" if GZIP_MQTL else ""
+GZIP_FLAG = "--gzip_output" if GZIP_MQTL else ""
+
+
 # ALL_DATASETS is every cohort defined in config; DATASETS is the subset this
 # invocation actually analyses. The two must stay distinct: prepare_datasets is
 # a single R call that writes every cohort in one pass, and extract_positions
@@ -44,9 +53,9 @@ FILTERED_VCF = f"{OUT}/genotypes/peg_imputed_maf05_rsq08.vcf.gz"
 rule all:
     input:
         # cis mQTL results per dataset — final outputs for this pipeline
-        expand("{out}/mqtl/{dataset}/cis_mqtls.txt",
+        expand("{out}/mqtl/{dataset}/cis_mqtls.txt" + MQTL_EXT,
                out=OUT, dataset=DATASETS),
-        expand("{out}/mqtl/{dataset}/trans_mqtls.txt",
+        expand("{out}/mqtl/{dataset}/trans_mqtls.txt" + MQTL_EXT,
                out=OUT, dataset=DATASETS)
 
 
@@ -295,8 +304,8 @@ rule run_mqtl:
         snp_pos    = f"{OUT}/positions/snp_positions.csv",
         cpg_pos    = f"{OUT}/positions/cpg_positions.csv"
     output:
-        cis   = f"{OUT}/mqtl/{{dataset}}/cis_mqtls.txt",
-        trans = f"{OUT}/mqtl/{{dataset}}/trans_mqtls.txt"
+        cis   = f"{OUT}/mqtl/{{dataset}}/cis_mqtls.txt{MQTL_EXT}",
+        trans = f"{OUT}/mqtl/{{dataset}}/trans_mqtls.txt{MQTL_EXT}"
     conda:
         "envs/r_mqtl.yaml"
     threads:
@@ -320,6 +329,7 @@ rule run_mqtl:
             --cis_dist    {config[matrixeqtl][cis_dist]} \
             --pval_cis    {config[matrixeqtl][pval_cis]} \
             --pval_trans  {config[matrixeqtl][pval_trans]} \
+            {GZIP_FLAG} \
             --threads     {threads} \
             --log         {log} \
         2>> {log}
