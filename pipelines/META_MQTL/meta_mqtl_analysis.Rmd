@@ -64,7 +64,19 @@ RESULTS <- list(
 # happens before cohorts are pooled, so a pair that would have reached
 # significance only by combining weak-but-concordant evidence across cohorts
 # can be cut. The load step warns when a file actually hits the cap.
-MAX_CIS_ROWS <- 10000000
+#
+# Raised 10,000,000 -> 15,000,000 on 2026-08-12. At 10M this truncated the two
+# largest cohorts (peg1_cases 10,266,866 rows; ppmi_cases 11,230,706), dropping
+# pairs before they could be pooled. Nothing on disk now exceeds 11.3M, so 15M
+# reads every cohort whole — and because a cap only bites on files larger than
+# itself, 15M costs exactly what 12M would today while leaving room for growth.
+#
+# Memory: the 10M run peaked at 18.5 GB of 31 GB (~450 MB per million rows via
+# fread). The extra ~1.5M rows should put it near 19 GB. This report, not the
+# overlap report, is the memory-bound one — the overlap report peaked at 5.4 GB
+# because readr produces far leaner structures than fread. If a future run OOMs
+# here, lower this before touching MAX_TRANS_ROWS.
+MAX_CIS_ROWS <- 15000000
 
 # PEG_MQTL and PPMI_MQTL now write gzipped output (matrixeqtl.gzip_output in
 # their config.yaml). Prefer the .gz when it exists so this report works both
