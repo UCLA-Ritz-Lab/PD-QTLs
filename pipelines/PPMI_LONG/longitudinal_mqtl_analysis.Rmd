@@ -23,6 +23,21 @@ library(lme4)
 library(lmerTest)
 library(parallel)
 library(ggplot2)
+
+# Counts quoted in the prose below, read here so they follow the data instead of
+# being hardcoded. Earlier revisions stated the run size and dynamic count as
+# literals, and both were wrong within a day of being written — the hit list
+# feeding this document changes whenever the meta-analysis is re-run.
+.cls <- function(g) read_csv(sprintf("../../results/PPMI_LONG/longitudinal_mqtl_%s_classified.csv", g),
+                              col_types = cols(.default = col_guess()), guess_max = Inf)
+.cases_cls    <- .cls("cases")
+.controls_cls <- .cls("controls")
+
+N_CASES        <- nrow(.cases_cls)
+N_CONTROLS     <- nrow(.controls_cls)
+N_DYN_CASES    <- sum(.cases_cls$dynamic,    na.rm = TRUE)
+N_DYN_CONTROLS <- sum(.controls_cls$dynamic, na.rm = TRUE)
+fmt <- function(x) format(x, big.mark = ",")
 ```
 
 ## Overview
@@ -40,9 +55,10 @@ model:
    sizes, and classify each pair as replicated / dynamic / neither.
 
 The model-fitting step tests every FDR-significant meta-analysis pair with
-`mclapply`-parallelized `lmer` calls — 1,223 pairs (cases) and 167 pairs (controls) in
-the current run, a few minutes end to end. (Earlier runs, before ancestry PCs entered
-the meta-analysis, carried ~18,986 and ~14,282 pairs and took hours.) **The fitting and
+`mclapply`-parallelized `lmer` calls — `r fmt(N_CASES)` pairs (cases) and
+`r fmt(N_CONTROLS)` pairs (controls) in the current run, roughly 45 minutes end to end.
+The count tracks whatever the upstream meta-analysis produced, so it moves whenever the
+per-cohort p-value thresholds or the downstream row caps change. **The fitting and
 classification chunks below are shown for documentation but are not re-executed on
 knit** (`eval=FALSE`); the results/summary section reads the CSV outputs that these
 scripts already produced (`longitudinal_mqtl_{group}_results.csv`,
@@ -502,10 +518,12 @@ ggplot(category_summary, aes(x = category, y = n, fill = group)) +
 
 Points are coloured by `dynamic` — whether the genotype × time interaction survives FDR
 correction, i.e. whether the genotype effect on methylation changes significantly over
-follow-up. In the current run **no pair is dynamic in either group**, so the colour
-aesthetic is single-valued and every point carries the same shade; the legend entry is
-retained so the plot stays comparable with earlier runs, which had 2 dynamic pairs in
-cases and 12 in controls.
+follow-up. The current run has **`r N_DYN_CASES` dynamic pair(s) in cases and
+`r N_DYN_CONTROLS` in controls**, so the highlighted points are rare by construction —
+read them individually rather than as a pattern. Note that the dynamic count is far
+more sensitive to the size of the input hit list than the replication rate is: a run
+with too few pairs can return zero dynamic pairs purely for lack of power, which is
+what happened when this document was built on a 1,223-pair hit list.
 
 ```{r beta-comparison-plot, fig.width=8, fig.height=6}
 ggplot(all_classified, aes(x = meta_beta, y = main_beta, color = dynamic)) +
