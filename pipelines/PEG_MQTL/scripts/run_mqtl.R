@@ -75,8 +75,8 @@ if (nrow(aligned) == 0) {
 
 meth_aligned <- meth_mat[, aligned$Pegid, drop=FALSE]
 rm(meth_mat); gc()
-# Note: geno matrix alignment is enforced when writing the SlicedData-ready
-# file below -- geno_samples retained for covariate intersection
+# Note: geno matrix columns are reordered to aligned$GWAS_ID below, before
+# MatrixEQTL (which pairs columns by position, not by name).
 
 # ── Load covariates ───────────────────────────────────────────────────────────
 covar_df  <- read.csv(opt$covar_file, stringsAsFactors=FALSE,
@@ -96,7 +96,8 @@ cat(sprintf("First 3 meth col names:  %s\n",
     paste(head(colnames(meth_aligned), 3), collapse=", ")))
 
 # Three-way intersection: meth x geno x covar
-pegids_in_covar <- Reduce(intersect, list(aligned$Pegid, geno_samples, colnames(covar_mat)))
+# (aligned already guarantees meth x geno; geno_samples are GWAS_IDs, not Pegids)
+pegids_in_covar <- intersect(aligned$Pegid, colnames(covar_mat))
 pegids_missing  <- setdiff(aligned$Pegid, colnames(covar_mat))
 
 cat(sprintf("Pegids in covar:  %d\n", length(pegids_in_covar)))
@@ -138,6 +139,28 @@ on.exit(unlink(c(tmp_meth, tmp_covar)), add = TRUE)
 
 write.table(meth_aligned,  tmp_meth,  sep = "\t", quote = FALSE)
 write.table(covar_aligned, tmp_covar, sep = "\t", quote = FALSE)
+
+# ── Reorder genotype columns to the aligned sample order ─────────────────────
+# MatrixEQTL pairs snps/gene/cvrt columns by POSITION. geno_tsv columns are in
+# file order (sorted GWAS_IDs) while meth/covar follow aligned$Pegid, so the
+# genotype file must be rewritten with columns in aligned$GWAS_ID order.
+geno_cols <- match(aligned$GWAS_ID, geno_samples)
+if (anyNA(geno_cols)) stop("aligned GWAS_IDs missing from geno_tsv header")
+tmp_geno <- tempfile(fileext = ".tsv.gz")
+on.exit(unlink(tmp_geno), add = TRUE)
+awk_cols <- paste(paste0("$", c(1, geno_cols + 1)), collapse = ", ")
+col_cmd  <- paste0("zcat ", opt$geno_tsv, " | awk 'BEGIN{OFS=\"\\t\"}{print ",
+                   awk_cols, "}' | gzip -c > ", tmp_geno)
+if (system(col_cmd) != 0) stop("Failed to reorder geno_tsv columns")
+
+# Hard check by NAME, not just count: geno column k must be meth column k.
+geno_hdr_new <- as.character(fread(cmd = paste("zcat", tmp_geno, "| head -1"),
+                                   header = FALSE, data.table = FALSE)[1, -1])
+meth_as_gwas <- id_map$GWAS_ID[match(colnames(meth_aligned), id_map$Pegid)]
+stopifnot(identical(geno_hdr_new, meth_as_gwas),
+          identical(colnames(meth_aligned), colnames(covar_aligned)))
+cat(sprintf("Genotype columns reordered and verified: %d samples\n",
+            length(geno_hdr_new)))
 rm(meth_aligned, covar_aligned); gc()
 
 # ── Build MatrixEQTL SlicedData objects ───────────────────────────────────────
@@ -145,13 +168,13 @@ snp_data   <- SlicedData$new()
 meth_data  <- SlicedData$new()
 covar_data <- SlicedData$new()
 
-# Load genotypes directly from bgzipped SNP-major file -- never fully in RAM
+# Load reordered genotypes (tmp_geno) -- SNP-major, sliced, never fully in RAM
 snp_data$fileDelimiter      <- "\t"
 snp_data$fileOmitCharacters <- "NA"
 snp_data$fileSkipRows       <- 1
 snp_data$fileSkipColumns    <- 1
 snp_data$fileSliceSize      <- 500
-snp_data$LoadFile(opt$geno_tsv)
+snp_data$LoadFile(tmp_geno)
 
 meth_data$fileDelimiter      <- "\t"
 meth_data$fileOmitCharacters <- "NA"

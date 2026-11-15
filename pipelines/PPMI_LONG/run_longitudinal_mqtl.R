@@ -127,7 +127,7 @@ run_longitudinal_group <- function(group, cohort_label, mc_cores = 8) {
 
   cat("\n========== Running group:", group, "(", cohort_label, ") ==========\n")
 
-  hits <- read_csv(sprintf("../../results/META_MQTL/meta/%s_sig_fdr05.csv", group),
+  hits <- read_csv(sprintf("../../results/META_MQTL/meta/%s_lead_fdr05.csv", group),
                     col_types = cols(.default = "c"), guess_max = Inf) %>%
     mutate(meta_beta = as.numeric(meta_beta), meta_pval = as.numeric(meta_pval),
            FDR_BH = as.numeric(FDR_BH))

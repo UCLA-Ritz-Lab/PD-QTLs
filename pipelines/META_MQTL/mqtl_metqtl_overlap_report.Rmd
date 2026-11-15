@@ -45,7 +45,7 @@ MAX_TRANS_ROWS <- 1000000
 
 ## Overview
 
-This report combines four analysis stages:
+This report combines three analysis stages:
 
 1. **metQTL FDR handling and overlap** — combining PEG1 c18 + hilic trans-metQTL
    results, and overlapping FDR-significant SNP-metabolite pairs against the
@@ -59,17 +59,16 @@ This report combines four analysis stages:
    meta-analysis mQTL hits fall near a known PD risk locus from Nalls et al.
    (2019, Table S2), then building a union table of case hits supported by
    *either* the metQTL overlap *or* GWAS proximity (or both).
-4. **Metabolite compound annotation** — resolving as many of the overlap
-   metabolite features as possible from their raw `mz_rt` labels to putative
-   compound identities, via xmsannotator mass/retention-time matching against
-   HMDB, KEGG, and LipidMaps (see Step 6).
 
-Metabolite features (`C18_mz_rt_...` / `HILIC_mz_rt_...`) are carried under
-their original mass-spec feature labels through Steps 1-5. No collaborator
-compound-ID mapping table ever materialized, so Step 6 instead resolves them
-independently via xmsannotator mass/retention-time matching — with partial
-coverage (23/33 features get any match, 11/33 a high-confidence named
-compound; see Step 6 for caveats).
+Metabolite features (`C18_mz_rt_...` / `HILIC_mz_rt_...`) are reported under
+their original mass-spec feature labels; they are **not** annotated to
+compounds. No collaborator compound-ID mapping exists. An earlier ad-hoc
+xmsannotator annotation (2026-07) covered the overlap from the pre-fix PEG
+results (genotype/sample misalignment and REF-allele coding, fixed
+2026-11-11/12), was not reproducible from this repo, and covered only 4 of the
+current overlap features, so it was dropped on 2026-11-15 (archived in
+`archive/pre_pegfix_20261114/`). Compound annotation, if needed, should be
+redone on the current overlap with a script kept in this repo.
 
 **A methodological note carried through this analysis:** the
 `trans_metqtls.txt.gz` files are generated with a liberal `pvOutputThreshold`
@@ -528,90 +527,23 @@ union_table %>%
 
 ---
 
-## Step 6: Metabolite compound annotation (xmsannotator)
+## Notes
 
-No collaborator compound-ID mapping table for the overlap metabolite
-features ever materialized, so this step resolves them independently:
-mass/retention-time matching (10ppm, ±30s) against the HMDB, KEGG, and
-LipidMaps reference databases via
-[xmsannotator](https://github.com/kuppal2/xmsannotator), run separately per
-platform (`c18`/`hilic`) and database in
-`annotate_overlap_metabolites_xmsannotator.R`. `c18`/`LipidMaps` did not
-finish that run (only 2 initial DB matches, stopped short of a compound
-call); the other 5 platform/db combinations completed. `rerun_step3_matching.R`
-re-derives the consolidated match tables read in below from that run's
-on-disk output without re-running the (expensive) annotation itself.
-
-```{r metabolite-annotation, cache=TRUE}
-best_annotation <- read_csv(file.path(RESULTS_DIR, "overlap_metabolite_best_annotation.csv"), show_col_types = FALSE) %>%
-  select(metabolite_feature, annotated_compound, confidence, score, source)
-
-n_any_match  <- n_distinct(best_annotation$metabolite_feature)
-named_match  <- best_annotation %>% filter(confidence == 2, !annotated_compound %in% c("", "-"))
-
-cat("Overlap metabolite features with any mz/rt match:      ", n_any_match, "/ 33\n")
-cat("Overlap metabolite features with a high-confidence,\n",
-    "named compound match:                                 ", nrow(named_match), "/ 33\n")
-
-overlap_cases_compounds <- overlap_cases_annot %>%
-  left_join(best_annotation, by = "metabolite_feature")
-
-overlap_controls_compounds <- overlap_controls_annot %>%
-  left_join(best_annotation, by = "metabolite_feature")
-
-union_table <- union_table %>%
-  left_join(best_annotation, by = "metabolite_feature")
-
-write_csv(overlap_cases_compounds, file.path(RESULTS_DIR, "mqtl_metqtl_overlap_cases_annotated_compounds.csv"))
-write_csv(overlap_controls_compounds, file.path(RESULTS_DIR, "mqtl_metqtl_overlap_controls_annotated_compounds.csv"))
-write_csv(union_table, file.path(RESULTS_DIR, "cases_union_metqtl_or_gwas.csv"))
-```
-
-### Annotated compounds
-
-A `confidence` of 2 / `score` of 100000 marks xmsannotator's high-confidence
-named calls; `confidence` 0 entries are a raw mass/RT hit only (frequently
-without a resolvable compound name) and are not treated as identifications
-below.
-
-```{r metabolite-annotation-table}
-named_match %>%
-  arrange(source, metabolite_feature) %>%
-  select(metabolite_feature, annotated_compound, source) %>%
-  kable(caption = "High-confidence (confidence = 2) compound matches for overlap metabolite features")
-```
-
-- The **GPX5/GPX6** metabolite feature (`C18_mz_rt_351.997_25.714`) got **no
-  match** in either c18 table — it remains unresolved, so the
-  glutathione/redox-pathway hypothesis raised earlier is still unconfirmed.
-- The **ERLIN1** SNP's metabolite features fared better: two of its four
-  associated features resolve to high-confidence matches, **N6-Methyl-L-lysine**
-  and **Valyl-Valine** — both amino-acid derivatives, consistent with
-  ERLIN1's role in ER lipid/protein handling but not a slam-dunk pathway
-  link on their own.
-- The **RUNX1** metabolite feature (`C18_mz_rt_709.527_218.804`) got no match.
-- These are still single mass/RT hits within a fairly loose tolerance
-  (10ppm/30s), not MS/MS-confirmed identities — treat names here as leads
-  for literature/pathway follow-up, not confirmed compound IDs.
 - The GWAS overlap (Step 4/5) is currently **cases only**, per the original
   request — extending the same window-match logic to the controls-side
   classified results is a straightforward addition if useful later.
+- The ±250 kb GWAS window is broad: it flags proximity to a Nalls locus, not
+  colocalization. Treat `in_gwas` as a pointer for coloc, not as evidence of a
+  shared causal variant.
 - The `union_table` combines metQTL support, GWAS proximity, and longitudinal
   dynamic classification at the SNP level; a hit can qualify through any one
-  criterion independently, and "any combo incl. dynamic" is the strongest
-  converging evidence in this analysis — a locus independently implicated by
-  PD genetic risk, metabolomics, methylation, and a time-varying genetic
-  effect.
-- The 2 `replicated_and_dynamic` case-level hits are now included in the
+  criterion independently, and a hit meeting several criteria is the
+  strongest converging evidence in this analysis.
+- The `replicated_and_dynamic` case-level hits are included in the
   union table regardless of metQTL/GWAS support (Step 5), and are shown
   explicitly in Step 2's dynamic-status table whether or not they overlap a
   metQTL.
-- Full output files (`*_combined_fdr.csv`, `*_sig_fdr05.csv`,
-  `mqtl_metqtl_overlap_*_annotated.csv`, `overlap_snp_gene_annotations.csv`,
-  `cases_union_metqtl_or_gwas.csv`, `mqtl_metqtl_overlap_*_annotated_compounds.csv`)
-  are written alongside this report for downstream use. The `*_annotated.csv`
-  files (Step 3) stay gene-annotation-only, since they're also the input
-  contract for `annotate_overlap_metabolites_xmsannotator.R` /
-  `rerun_step3_matching.R`; the compound annotations from Step 6 are joined
-  into separate `*_annotated_compounds.csv` files and into
-  `cases_union_metqtl_or_gwas.csv` instead, to avoid changing that contract.
+- Output files written alongside this report: `peg1_*_metqtl_combined_fdr.csv.gz`,
+  `peg1_*_metqtl_sig_fdr05.csv`, `mqtl_metqtl_overlap_{cases,controls}.csv`,
+  `mqtl_metqtl_overlap_*_annotated.csv` (Ensembl gene annotation),
+  `overlap_snp_gene_annotations.csv`, and `cases_union_metqtl_or_gwas.csv`.

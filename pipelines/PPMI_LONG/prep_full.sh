@@ -8,7 +8,7 @@ OUT_DIR=../../results/PPMI_LONG
 
 for GRP in cases controls; do
   echo "=== Preparing $GRP ==="
-  HITS=${META_DIR}/${GRP}_sig_fdr05.csv
+  HITS=${META_DIR}/${GRP}_lead_fdr05.csv
 
   tail -n +2 "$HITS" | awk -F',' '{print $2}' | sort -u > ${OUT_DIR}/${GRP}_target_snps.txt
   tail -n +2 "$HITS" | awk -F',' '{print $3}' | sort -u > ${OUT_DIR}/${GRP}_target_cpgs.txt

@@ -158,6 +158,66 @@ rule prepare_datasets:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Step 2b: Cohort-wide allele frequencies -> counted allele per position
+# Mirrors PPMI_MQTL. Without --export-allele, `plink2 --export Av` counts REF,
+# so PEG betas came out per-REF while PPMI's are per-ALT (opposite signs; found
+# 2026-11-12). Here we pick ONE record per chr:pos (the split multiallelic
+# record whose ALT is most frequent across all genotyped PEG samples) and count
+# that record's ALT. The same file is reused by PEG_METAB, so mQTL and metQTL
+# share one coding. See scripts/best_allele.awk.
+# ──────────────────────────────────────────────────────────────────────────────
+rule allele_frequencies:
+    input:
+        vcf = FILTERED_VCF
+    output:
+        afreq         = f"{OUT}/positions/cohort_allele_freq.afreq",
+        export_allele = f"{OUT}/positions/export_allele.txt",
+        keep_variants = f"{OUT}/positions/best_variants.txt"
+    conda:
+        "envs/tools.yaml"
+    threads:
+        config["resources"]["threads_plink"]
+    log:
+        f"{OUT}/logs/allele_frequencies.log"
+    shell:
+        """
+        set -euo pipefail
+        mkdir -p {OUT}/positions
+
+        # All samples in the VCF; unique chr:pos:ref:alt IDs so split
+        # multiallelic records stay distinct.
+        plink2 \
+            --vcf   {input.vcf} dosage=DS \
+            --snps-only \
+            --max-alleles 2 \
+            --set-all-var-ids '@:#:$r:$a' \
+            --new-id-max-allele-len 50 missing \
+            --freq \
+            --out   {OUT}/positions/cohort_allele_freq \
+            --threads {threads} \
+        2> {log}
+
+        awk -f scripts/best_allele.awk {output.afreq} > {output.export_allele}
+        cut -f1 {output.export_allele} > {output.keep_variants}
+
+        n_af=$(grep -vc '^#' {output.afreq})
+        n_ea=$(wc -l < {output.export_allele})
+        echo "Allele freq records: $n_af" >> {log}
+        echo "Export allele file:  $n_ea variants (one per chr:pos)" >> {log}
+        echo "Dropped as non-best at a shared position: $((n_af - n_ea))" >> {log}
+
+        # Every emitted allele must be the ALT of its own record, otherwise
+        # PLINK2 silently exports all-zero dosage.
+        n_bad=$(awk -F'\t' '{{n=split($1,p,":"); if (p[n] != $2) c++}} END {{print c+0}}' \
+                {output.export_allele})
+        if [ "$n_bad" -ne 0 ]; then
+            echo "ERROR: $n_bad export-allele entries name an allele absent from their record" >> {log}
+            exit 1
+        fi
+        """
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Step 3: Extract SNP and CpG positions
 # Needs a QC-filtered .pvar from any dataset — use peg1_cases as reference
 # ──────────────────────────────────────────────────────────────────────────────
@@ -165,7 +225,8 @@ rule extract_positions:
     input:
         keep_file  = f"{OUT}/datasets/peg1_cases/geno_keep.txt",
         probe_list = f"{OUT}/datasets/retained_probes.txt",
-        vcf        = FILTERED_VCF
+        vcf        = FILTERED_VCF,
+        keep_variants = f"{OUT}/positions/best_variants.txt"
     output:
         snp_pos = f"{OUT}/positions/snp_positions.csv",
         cpg_pos = f"{OUT}/positions/cpg_positions.csv",
@@ -180,7 +241,8 @@ rule extract_positions:
         """
         set -euo pipefail
 
-        # Generate a reference .pvar from the full VCF with QC filters
+        # Generate a reference .pvar from the full VCF with QC filters,
+        # restricted to the one counted record per chr:pos
         plink2 \
             --vcf   {input.vcf} dosage=DS \
             --keep  {input.keep_file} \
@@ -189,8 +251,9 @@ rule extract_positions:
             --hwe   {config[plink][hwe]} \
             --max-alleles 2 \
             --snps-only \
-            --set-missing-var-ids '@:#:$r:$a' \
+            --set-all-var-ids '@:#:$r:$a' \
             --new-id-max-allele-len 50 missing \
+            --extract {input.keep_variants} \
             --no-psam-pheno \
             --make-just-pvar \
             --out   {OUT}/positions/reference \
@@ -239,7 +302,7 @@ rule subset_genotypes:
             --hwe  {config[plink][hwe]} \
             --max-alleles 2 \
             --snps-only \
-            --set-missing-var-ids '@:#:$r:$a' \
+            --set-all-var-ids '@:#:$r:$a' \
             --new-id-max-allele-len 50 missing \
             --no-psam-pheno \
             --make-pgen \
@@ -259,7 +322,9 @@ rule export_genotypes:
     input:
         pgen = f"{OUT}/genotypes/{{dataset}}.pgen",
         psam = f"{OUT}/genotypes/{{dataset}}.psam",
-        pvar = f"{OUT}/genotypes/{{dataset}}.pvar"
+        pvar = f"{OUT}/genotypes/{{dataset}}.pvar",
+        export_allele = f"{OUT}/positions/export_allele.txt",
+        keep_variants = f"{OUT}/positions/best_variants.txt"
     output:
         tsv = f"{OUT}/genotypes/{{dataset}}.geno.tsv.gz"
     conda:
@@ -274,18 +339,32 @@ rule export_genotypes:
         """
         set -euo pipefail
 
-        # Export variant-major additive dosage (SNPs x samples)
+        # Export variant-major additive dosage (SNPs x samples), counting the
+        # ALT allele chosen in allele_frequencies (default would count REF).
         # .traw columns: CHR SNP CM POS COUNTED ALT sample1 sample2 ...
         plink2 \
-            --pfile   {params.prefix} \
-            --export  Av \
-            --out     {params.prefix} \
-            --threads {threads} \
+            --pfile          {params.prefix} \
+            --extract        {input.keep_variants} \
+            --export         Av \
+            --export-allele  {input.export_allele} \
+            --out            {params.prefix} \
+            --threads        {threads} \
         2> {log}
 
+        # Hard check: COUNTED must be the ALT encoded in each chr:pos:REF:ALT ID
+        n_bad=$(awk 'NR>1 {{n=split($2,p,":"); if ($5 != p[n]) c++}} END {{print c+0}}' {params.prefix}.traw)
+        if [ "$n_bad" -ne 0 ]; then
+            echo "ERROR: $n_bad variants not counting their ALT allele" >> {log}
+            exit 1
+        fi
+        echo "Counted allele = ALT for all variants" >> {log}
+
         # Reformat .traw to MatrixEQTL SNP-major TSV via external awk script
-        # (avoids quoting/escape issues with inline awk in Snakemake shell blocks)
-        awk -f scripts/reformat_traw.awk {params.prefix}.traw | bgzip -c > {output.tsv}
+        # (strips :REF:ALT from IDs). The chr:pos dedup is only a backstop:
+        # --extract already leaves one record per position.
+        awk -f scripts/reformat_traw.awk {params.prefix}.traw | \
+            awk 'NR==1{{print; next}} !seen[$1]++{{print}}' | \
+            bgzip -c > {output.tsv}
 
         rm -f {params.prefix}.traw
         echo "SNPs exported: $(zcat {output.tsv} | tail -n +2 | wc -l)" >> {log}

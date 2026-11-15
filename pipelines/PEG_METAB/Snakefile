@@ -242,7 +242,7 @@ rule subset_genotypes:
             --hwe  {config[plink][hwe]} \
             --max-alleles 2 \
             --snps-only \
-            --set-missing-var-ids '@:#:$r:$a' \
+            --set-all-var-ids '@:#:$r:$a' \
             --new-id-max-allele-len 50 missing \
             --no-psam-pheno \
             --make-pgen \
@@ -256,13 +256,21 @@ rule subset_genotypes:
 # Step 5: Export genotypes in SNP-major format for MatrixEQTL
 # --export Av writes SNPs as rows, samples as columns — no in-R transpose.
 # reformat_traw.awk strips PLINK metadata and strips allele suffixes from IDs.
-# Dedup via !seen[$1]++ removes duplicate chr:pos rows from multiallelic sites.
+# Counted allele: the ALT of the one record per chr:pos chosen by PEG_MQTL's
+# allele_frequencies rule (reused, like reference.pvar, so mQTL and metQTL share
+# one coding). Without --export-allele plink2 counts REF (fixed 2026-11-12).
+# The !seen[$1]++ dedup is only a backstop now that --extract keeps one record
+# per position.
 # ------------------------------------------------------------------------------
+PEG_MQTL_POS = "../../results/PEG_MQTL/positions"
+
 rule export_genotypes:
     input:
         pgen = f"{OUT}/genotypes/{{dataset}}.pgen",
         psam = f"{OUT}/genotypes/{{dataset}}.psam",
-        pvar = f"{OUT}/genotypes/{{dataset}}.pvar"
+        pvar = f"{OUT}/genotypes/{{dataset}}.pvar",
+        export_allele = f"{PEG_MQTL_POS}/export_allele.txt",
+        keep_variants = f"{PEG_MQTL_POS}/best_variants.txt"
     output:
         tsv = f"{OUT}/genotypes/{{dataset}}.geno.tsv.gz"
     conda:
@@ -278,11 +286,21 @@ rule export_genotypes:
         set -euo pipefail
 
         plink2 \
-            --pfile   {params.prefix} \
-            --export  Av \
-            --out     {params.prefix} \
-            --threads {threads} \
+            --pfile          {params.prefix} \
+            --extract        {input.keep_variants} \
+            --export         Av \
+            --export-allele  {input.export_allele} \
+            --out            {params.prefix} \
+            --threads        {threads} \
         2> {log}
+
+        # Hard check: COUNTED must be the ALT encoded in each chr:pos:REF:ALT ID
+        n_bad=$(awk 'NR>1 {{n=split($2,p,":"); if ($5 != p[n]) c++}} END {{print c+0}}' {params.prefix}.traw)
+        if [ "$n_bad" -ne 0 ]; then
+            echo "ERROR: $n_bad variants not counting their ALT allele" >> {log}
+            exit 1
+        fi
+        echo "Counted allele = ALT for all variants" >> {log}
 
         awk -f scripts/reformat_traw.awk {params.prefix}.traw | \
             awk 'NR==1{{print; next}} !seen[$1]++{{print}}' | \
