@@ -27,7 +27,9 @@ pvar <- fread(opt$pvar_file, skip="#CHROM", data.table=FALSE)
 colnames(pvar)[1] <- "CHROM"
 
 snp_pos <- data.frame(
-  snp_id = pvar$ID,
+  # IDs are chr:pos:REF:ALT (PEG_MQTL reference.pvar); strip the alleles so
+  # snp_id matches the geno_tsv rows written by reformat_traw.awk.
+  snp_id = sub(":[ACGT]+:[ACGT]+$", "", pvar$ID),
   chr    = as.character(pvar$CHROM),
   pos    = pvar$POS
 )
@@ -35,6 +37,7 @@ snp_pos <- data.frame(
 # Normalise chr format — strip "chr" prefix if present
 snp_pos$chr <- sub("^chr", "", snp_pos$chr)
 
+stopifnot(!anyDuplicated(snp_pos$snp_id))
 fwrite(snp_pos, opt$out_snp_pos, sep=",")
 cat(sprintf("SNP positions written: %d SNPs\n", nrow(snp_pos)))
 

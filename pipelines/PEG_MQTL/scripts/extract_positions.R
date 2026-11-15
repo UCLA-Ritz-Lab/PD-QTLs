@@ -25,9 +25,16 @@ on.exit({ sink(type="message"); close(log_con) })
 
 # ── SNP positions from PLINK2 .pvar ──────────────────────────────────────────
 cat("Loading SNP positions from .pvar...\n")
-pvar <- fread(opt$pvar_file, data.table=FALSE) %>%
+pvar <- fread(opt$pvar_file, skip="#CHROM", data.table=FALSE) %>%
   select(snp_id=ID, chr=`#CHROM`, pos=POS) %>%
-  mutate(chr=as.character(chr))
+  mutate(
+    chr    = as.character(chr),
+    # IDs are chr:pos:REF:ALT (--set-all-var-ids); strip the alleles so
+    # snp_id matches the geno_tsv rows written by reformat_traw.awk.
+    snp_id = sub(":[ACGT]+:[ACGT]+$", "", snp_id)
+  )
+# extract_positions keeps one record per chr:pos (best_variants.txt)
+stopifnot(!anyDuplicated(pvar$snp_id))
 
 cat(sprintf("SNPs: %d\n", nrow(pvar)))
 fwrite(pvar, opt$out_snp_pos)

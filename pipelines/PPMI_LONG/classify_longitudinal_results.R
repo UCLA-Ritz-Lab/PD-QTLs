@@ -68,7 +68,7 @@ classify_group <- function(group, meta_file) {
   classified
 }
 
-cases_classified    <- classify_group("cases",    "../../results/META_MQTL/meta/cases_sig_fdr05.csv")
-controls_classified <- classify_group("controls", "../../results/META_MQTL/meta/controls_sig_fdr05.csv")
+cases_classified    <- classify_group("cases",    "../../results/META_MQTL/meta/cases_lead_fdr05.csv")
+controls_classified <- classify_group("controls", "../../results/META_MQTL/meta/controls_lead_fdr05.csv")
 
 cat("\n========== DONE ==========\n")
