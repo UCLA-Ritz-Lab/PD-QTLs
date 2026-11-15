@@ -5,10 +5,22 @@
 # from the merged filtered VCF which was already generated:
 #   results/merged/merged.filtered.vcf.gz
 #
+# merged.filtered.vcf.gz carries a sample-column duplication inherited from
+# the PPMI/AMP-PD release: every patient appears twice, as
+# "PPMISI{id}.variant" (indel callset) and "PPMISI{id}.variant2" (SNP
+# callset), instead of one merged genotype per patient. At SNP sites the
+# ".variant" column is a near-constant 0/0 stub (the indel model wasn't
+# examining that allele), which was diluting every SNP allele frequency
+# submitted to MIS by roughly half. See scripts/make_sample_names.sh for
+# the origin of the .variant/.variant2 naming.
+#
 # Steps:
-#   5. split_by_chrom         — split merged VCF into per-chromosome VCFs
-#   6. prepare_for_imputation — site QC + MIS-compatible VCF per chromosome
-#   7. pre_imputation_report  — variant counts per chromosome
+#   5a. dedup_samples          — drop the ".variant" (indel) duplicate
+#                                 columns, keep ".variant2" (SNP) only,
+#                                 restore plain "PPMISI{id}" sample names
+#   5b. split_by_chrom         — split deduplicated VCF into per-chromosome VCFs
+#   6.  prepare_for_imputation — site QC + MIS-compatible VCF per chromosome
+#   7.  pre_imputation_report  — variant counts per chromosome
 #
 # Steps 1-4 (index, normalize, merge, filter) are omitted since their outputs
 # already exist. Re-run the full pipeline once the source VCFs are recovered.
@@ -37,13 +49,68 @@ rule all:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Step 5: Split merged VCF by chromosome
-# Input: the already-generated merged.filtered.vcf.gz
+# Step 5a: Drop duplicate ".variant" (indel-callset) sample columns
+#
+# merged.filtered.vcf.gz has two columns per patient: "PPMISI{id}.variant"
+# (indel callset, ~always 0/0 at SNP sites) and "PPMISI{id}.variant2" (SNP
+# callset, the real genotype). Keep only .variant2 and rename it back to
+# "PPMISI{id}" so downstream AF/missingness calculations reflect the true
+# 894-patient cohort instead of an 1,788-column mix half-diluted with
+# constant reference calls.
 # ──────────────────────────────────────────────────────────────────────────────
-rule split_by_chrom:
+rule dedup_samples:
     input:
         vcf = f"{OUT}/merged/merged.filtered.vcf.gz",
         tbi = f"{OUT}/merged/merged.filtered.vcf.gz.tbi"
+    output:
+        vcf = f"{OUT}/merged/merged.dedup.vcf.gz",
+        tbi = f"{OUT}/merged/merged.dedup.vcf.gz.tbi",
+        samples = f"{OUT}/merged/samples_snp_only.txt",
+        renamed = f"{OUT}/merged/samples_snp_only.renamed.txt"
+    conda:
+        "envs/bcftools.yaml"
+    threads:
+        config["resources"]["threads_bcftools"]
+    log:
+        f"{OUT}/logs/merge/dedup_samples.log"
+    shell:
+        """
+        set -euo pipefail
+
+        bcftools query -l {input.vcf} | grep '\\.variant2$' > {output.samples}
+        sed 's/\\.variant2$//' {output.samples} > {output.renamed}
+
+        n_total=$(bcftools query -l {input.vcf} | wc -l)
+        n_keep=$(wc -l < {output.samples})
+        echo "Input sample columns (patients x2, SNP+indel duplicate): $n_total" > {log}
+        echo "Samples kept (.variant2 / SNP callset, deduplicated): $n_keep" >> {log}
+
+        bcftools view \
+            --samples-file {output.samples} \
+            --output-type z \
+            --output {OUT}/merged/.tmp.dedup.vcf.gz \
+            {input.vcf} \
+        2>> {log}
+
+        bcftools reheader \
+            --samples {output.renamed} \
+            --output {output.vcf} \
+            {OUT}/merged/.tmp.dedup.vcf.gz \
+        2>> {log}
+
+        rm -f {OUT}/merged/.tmp.dedup.vcf.gz
+
+        tabix -p vcf {output.vcf} 2>> {log}
+        """
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 5b: Split deduplicated VCF by chromosome
+# ──────────────────────────────────────────────────────────────────────────────
+rule split_by_chrom:
+    input:
+        vcf = f"{OUT}/merged/merged.dedup.vcf.gz",
+        tbi = f"{OUT}/merged/merged.dedup.vcf.gz.tbi"
     output:
         vcf = f"{OUT}/by_chrom/{{chrom}}.vcf.gz",
         tbi = f"{OUT}/by_chrom/{{chrom}}.vcf.gz.tbi"
@@ -150,7 +217,7 @@ rule pre_imputation_report:
 
         echo "=== PPMI WGS Pre-Imputation QC Report ==="  >  {output.report}
         echo "Reference panel target: HRC r1.1 2016 (GRCh37/hg19)" >> {output.report}
-        echo "Resumed from: results/merged/merged.filtered.vcf.gz"  >> {output.report}
+        echo "Resumed from: results/merged/merged.filtered.vcf.gz (deduplicated to merged.dedup.vcf.gz)"  >> {output.report}
         echo ""                                                       >> {output.report}
         printf "%-6s %12s\n" "CHROM" "N_VARIANTS"                  >> {output.report}
         printf "%-6s %12s\n" "-----" "----------"                  >> {output.report}

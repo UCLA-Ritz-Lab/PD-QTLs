@@ -1,8 +1,12 @@
 name: bcftools_env
+# conda-forge first and no `defaults`. As of 2026-08 that channel's
+# c-ares/libnghttp2 are too old for the solver to reach any libcurl new
+# enough for htslib 1.19, which makes the env unsolvable on a fresh
+# machine. bioconda's own recommended channel order is conda-forge,
+# bioconda.
 channels:
-  - bioconda
   - conda-forge
-  - defaults
+  - bioconda
 dependencies:
   - bcftools=1.19
   - htslib=1.19
